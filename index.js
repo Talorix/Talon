@@ -172,8 +172,6 @@ async function streamStats(ws, container, containerId) {
 
 async function executeCommand(ws, container, command) {
   try {
-    // Attach to container
-    console.log('sent req for execution');
     const stream = await container.attach({
       stream: true,
       stdin: true,
@@ -182,7 +180,6 @@ async function executeCommand(ws, container, command) {
       hijack: true,
     });
 
-    // Forward output to websocket
     stream.on("data", chunk => {
       if (ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ event: 'cmd', payload: chunk.toString('utf8') }));
@@ -193,14 +190,12 @@ async function executeCommand(ws, container, command) {
       ws.send(JSON.stringify({ event: 'error', payload: err.message }));
     });
 
-    // Keep the stream open, just write the command
     stream.write(command + "\n");
     stream.end();
   } catch (err) {
     ws.send(JSON.stringify({ event: 'error', payload: err.message }));
   }
 }
-
 
 async function performPower(ws, container, action) {
   try {
