@@ -1,0 +1,21 @@
+{
+  "name": "talorixnode",
+  "version": "0.0.1",
+  "description": "node for talorix",
+  "keywords": [
+    "node"
+  ],
+  "license": "GPL-3.0-or-later",
+  "author": "hydrenlabs",
+  "type": "commonjs",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "dependencies": {
+    "dockerode": "^4.0.9",
+    "express": "^5.2.1",
+    "express-ws": "^5.0.2",
+    "multer": "^2.0.2"
+  }
+}
