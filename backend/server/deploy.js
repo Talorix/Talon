@@ -44,6 +44,18 @@ const saveData = async (data) => {
   await fsPromises.writeFile(DATA_FILE, JSON.stringify(data, null, 2), 'utf8');
 };
 
+async function replacePlaceholders(filePath, env) {
+  // Only process small text-based files
+  const ext = path.extname(filePath).toLowerCase();
+  if (!['.txt', '.json', '.properties'].includes(ext)) return;
+
+  let content = await fsPromises.readFile(filePath, 'utf8');
+
+  // Replace {{KEY}} with env.KEY if exists
+  content = content.replace(/{{(.*?)}}/g, (_, key) => env[key] ?? `{{${key}}}`);
+
+  await fsPromises.writeFile(filePath, content, 'utf8');
+}
 router.post('/create', async (req, res) => {
   const idt = Math.random().toString(36).substring(2, 12);
   const volumePath = path.join(DATA_DIR, idt);
@@ -56,9 +68,10 @@ router.post('/create', async (req, res) => {
     for (const file of files) {
       const dest = path.join(volumePath, file.filename);
       await downloadFile(file.url, dest);
+      await replacePlaceholders(dest, { ...env, MEMORY: `${ram}M`, TID: idt, PORT: port });
     }
 
-    const containerEnv = { ...env, MEMORY: env.MEMORY || '2G', TID: idt, PORT: port };
+    const containerEnv = { ...env, MEMORY: `${ram}M`, TID: idt, PORT: port };
 
     const hostConfig = {
       Binds: [`${volumePath}:/app/data`],
