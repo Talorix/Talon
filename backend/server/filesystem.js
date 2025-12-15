@@ -18,7 +18,21 @@ function resolvePath(idt, relPath) {
   return fullPath;
 }
 
-// List files and folders in JSON with createdAt and extension
+async function getFolderSize(folderPath) {
+  let total = 0;
+  const items = await fsPromises.readdir(folderPath, { withFileTypes: true });
+  for (const item of items) {
+    const itemPath = path.join(folderPath, item.name);
+    if (item.isDirectory()) {
+      total += await getFolderSize(itemPath); // recursive
+    } else {
+      const stats = await fsPromises.stat(itemPath);
+      total += stats.size;
+    }
+  }
+  return total;
+}
+
 router.get('/:idt/files', async (req, res) => {
   const { idt } = req.params;
   const relPath = req.query.path || '/';
@@ -27,11 +41,21 @@ router.get('/:idt/files', async (req, res) => {
     const items = await fsPromises.readdir(dirPath, { withFileTypes: true });
 
     const result = await Promise.all(items.map(async (item) => {
-      const stats = await fsPromises.stat(path.join(dirPath, item.name));
+      const itemPath = path.join(dirPath, item.name);
+      let size = null;
+      if (item.isFile()) {
+        const stats = await fsPromises.stat(itemPath);
+        size = stats.size;
+      } else if (item.isDirectory()) {
+        size = await getFolderSize(itemPath);
+      }
+
+      const stats = await fsPromises.stat(itemPath);
       return {
         name: item.name,
         type: item.isDirectory() ? 'folder' : 'file',
         createdAt: stats.birthtime,
+        size,
         extension: item.isFile() ? path.extname(item.name) : null
       };
     }));
