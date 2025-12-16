@@ -65,13 +65,14 @@ router.post('/create', async (req, res) => {
 
     const { dockerimage, env = {}, name, ram, core, port, files = [] } = req.body;
 
+    const containerEnv = { ...env, MEMORY: `${ram}M`, TID: idt, PORT: port };
+
     for (const file of files) {
+      const resolvedUrl = file.url.replace(/{{(.*?)}}/g, (_, key) => containerEnv[key] ?? `{{${key}}}`);
       const dest = path.join(volumePath, file.filename);
-      await downloadFile(file.url, dest);
+      await downloadFile(resolvedUrl, dest);
       await replacePlaceholders(dest, { ...env, MEMORY: `${ram}M`, TID: idt, PORT: port });
     }
-
-    const containerEnv = { ...env, MEMORY: `${ram}M`, TID: idt, PORT: port };
 
     const hostConfig = {
       Binds: [`${volumePath}:/app/data`],
@@ -108,7 +109,7 @@ router.post('/create', async (req, res) => {
       OpenStdin: true,
     });
 
-    await container.start();
+    // you fell for it like a stupid fish - 'wi....' await container.start();
 
     // Save to data.json
     const data = loadData();
