@@ -41,6 +41,17 @@ const saveData = async (data) => {
   await fsPromises.writeFile(DATA_FILE, JSON.stringify(data, null, 2), 'utf8');
 };
 
+async function replacePlaceholders(filePath, env) {
+  const ext = path.extname(filePath).toLowerCase();
+  if (!['.txt', '.json', '.properties'].includes(ext)) return;
+
+  let content = await fsPromises.readFile(filePath, 'utf8');
+
+  // Replace {{KEY}} with env.KEY if exists
+  content = content.replace(/{{(.*?)}}/g, (_, key) => env[key] ?? `{{${key}}}`);
+
+  await fsPromises.writeFile(filePath, content, 'utf8');
+}
 /**
  * POST /reinstall/:idt
  * Reinstall a server: moves current files to tmp, downloads new files, restores old files
@@ -52,65 +63,60 @@ router.post('/reinstall/:idt', async (req, res) => {
   const existing = data[idt];
   if (!existing) return res.status(404).json({ error: 'Server not found' });
 
+  const incomingEnv = req.body?.env;
+  if (incomingEnv && typeof incomingEnv === 'object') existing.env = incomingEnv;
+
   const volumePath = path.join(DATA_DIR, idt);
   const tmpPath = path.join(DATA_DIR, `${idt}_tmp`);
 
   try {
-    // Stop container if running
+    // Stop and remove container if running
     if (existing.containerId) {
       try {
         const container = docker.getContainer(existing.containerId);
-
-        // Stop if running
         try { await container.stop({ t: 5 }); } catch {}
-
-        // Force remove container
         await container.remove({ force: true });
-      } catch (e) { 
-        console.log('Could not stop/remove container:', e.message); 
-      }
+      } catch (e) { console.log('Could not stop/remove container:', e.message); }
     }
 
-    // Move existing files to tmp
+    // Remove old tmp folder and move current data to tmp
     if (fs.existsSync(tmpPath)) await fsPromises.rm(tmpPath, { recursive: true, force: true });
     if (fs.existsSync(volumePath)) await fsPromises.rename(volumePath, tmpPath);
 
-    // Recreate volume folder
+    const mergedEnv = { ...existing.env, MEMORY: existing.env.MEMORY || '2G', TID: idt, PORT: existing.port };
     await fsPromises.mkdir(volumePath, { recursive: true });
 
-    // Download files
+    // Download fresh files
     for (const file of existing.files) {
+      const resolvedUrl = file.url.replace(/{{(.*?)}}/g, (_, key) => mergedEnv[key] ?? `{{${key}}}`);
       const dest = path.join(volumePath, file.filename);
-      await downloadFile(file.url, dest);
+    //  DEBUG: console.log(resolvedUrl);
+      await downloadFile(resolvedUrl, dest);
+      await replacePlaceholders(dest, mergedEnv);
     }
 
-    // Move old files from tmp back
+    // Restore old files from tmp only if they don't exist in fresh volume
     if (fs.existsSync(tmpPath)) {
-      const tmpFiles = await fsPromises.readdir(tmpPath);
-      for (const file of tmpFiles) {
-        const src = path.join(tmpPath, file);
-        const dest = path.join(volumePath, file);
-        await fsPromises.rename(src, dest);
-      }
+      await Promise.all(
+        (await fsPromises.readdir(tmpPath))
+          .filter(f => !fs.existsSync(path.join(volumePath, f)))
+          .map(f => fsPromises.rename(path.join(tmpPath, f), path.join(volumePath, f)))
+      );
       await fsPromises.rm(tmpPath, { recursive: true, force: true });
     }
 
-    // Recreate container
-    const mergedEnv = { ...existing.env, MEMORY: existing.env.MEMORY || '2G', TID: idt, PORT: existing.port };
-
+    // Docker container setup
     const hostConfig = {
       Binds: [`${volumePath}:/app/data`],
       Memory: existing.ram ? existing.ram * 1024 * 1024 : undefined,
       NanoCPUs: existing.core ? existing.core * 1e9 : undefined,
     };
-
     const exposedPorts = {};
     if (existing.port) {
       hostConfig.PortBindings = { [`${existing.port}/tcp`]: [{ HostPort: existing.port.toString() }] };
       exposedPorts[`${existing.port}/tcp`] = {};
     }
 
-    // Pull Docker image
     await new Promise((resolve, reject) => {
       docker.pull(existing.dockerimage, (err, stream) => {
         if (err) return reject(err);
@@ -120,21 +126,20 @@ router.post('/reinstall/:idt', async (req, res) => {
 
     const container = await docker.createContainer({
       Image: existing.dockerimage,
-      name: `talorix_${idt}`, // same name is fine now because old container is removed
+      name: `talorix_${idt}`,
       Env: objectToEnv(mergedEnv),
       HostConfig: hostConfig,
       ExposedPorts: exposedPorts,
       AttachStdout: true,
       AttachStderr: true,
       AttachStdin: true,
-      StdinOnce: false, 
+      StdinOnce: false,
       Tty: true,
       OpenStdin: true,
     });
 
     await container.start();
 
-    // Update data.json
     existing.containerId = container.id;
     existing.env = mergedEnv;
     await saveData(data);
@@ -142,7 +147,6 @@ router.post('/reinstall/:idt', async (req, res) => {
     res.json({ message: 'Server reinstalled successfully', containerId: container.id });
 
   } catch (err) {
-    // Restore from tmp if something fails
     if (fs.existsSync(tmpPath) && !fs.existsSync(volumePath)) await fsPromises.rename(tmpPath, volumePath);
     res.status(500).json({ error: err.message });
     console.log(err);
