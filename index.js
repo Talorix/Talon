@@ -1,10 +1,14 @@
+// index.js — Talorix API + WS (cleaned + fixed disk-check + consistent events)
 // Alpha Release v1, Report bugs to ma5z_
+
 const express = require("express");
 const http = require("http");
 const WebSocket = require("ws");
 const Docker = require("dockerode");
 const docker = new Docker();
 const os = require("os");
+const path = require("path");
+const fsPromises = require("fs").promises;
 
 const ar = require("./backend/server/deploy.js");
 const br = require("./backend/server/info.js");
@@ -13,37 +17,13 @@ const dr = require("./backend/server/delete.js");
 const er = require("./backend/server/filesystem.js");
 const fr = require("./backend/server/reinstall.js");
 
+const data = require("./data.json");
+const config = require("./config.json");
+
 const app = express();
 app.use(express.json());
 
-const config = require("./config.json");
-
-// --- Helper: Check if Docker is running ---
-async function isDockerRunning() {
-  try {
-    await docker.ping();
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-// --- API Key Middleware ---
-app.use((req, res, next) => {
-  if (req.query.key !== config.key)
-    return res.status(401).json({ error: "Invalid key" });
-  next();
-});
-
-// --- REST routers ---
-app.use("/server", ar);
-app.use("/server", br);
-app.use("/server", cr);
-app.use("/server", dr);
-app.use("/server/fs", er);
-app.use("/server", fr);
-
-// ANSI helpers
+// ANSI helpers (for payloads)
 const ANSI = {
   reset: "\x1b[0m",
   red: "\x1b[31m",
@@ -54,248 +34,427 @@ const ANSI = {
   cyan: "\x1b[36m",
   gray: "\x1b[90m",
 };
-
-// Build colored message safely
 function ansi(tag, color, message) {
   return `${ANSI[color] || ""}[${tag}]${ANSI.reset} ${message}`;
 }
 
-// --- HTTP server ---
-const server = http.createServer(app);
-
-// --- WebSocket server (improved) ---
-const wss = new WebSocket.Server({ noServer: true });
-
-// Maps for managing clients & resources per container
-const clients = new Map(); // containerId => Set(ws)
-const logStreams = new Map(); // containerId => { stream, refCount }
-const statsIntervals = new Map(); // containerId => { intervalId, refCount }
-
-// Helpers
-function sendEvent(ws, event, payload) {
-  if (ws && ws.readyState === WebSocket.OPEN) {
-    try {
-      ws.send(JSON.stringify({ event, payload, ts: new Date().toISOString() }));
-    } catch (err) {
-      console.error("sendEvent error", err);
-    }
+// --- Docker health helper ---
+async function isDockerRunning() {
+  try {
+    await docker.ping();
+    return true;
+  } catch {
+    return false;
   }
 }
 
-function broadcastToContainer(containerId, event, payload) {
-  const set = clients.get(containerId);
-  if (!set) return;
-  for (const c of set) sendEvent(c, event, payload);
+// API key middleware
+app.use((req, res, next) => {
+  if (req.query.key !== config.key)
+    return res.status(401).json({ error: "Invalid key" });
+  next();
+});
+
+// REST routers
+app.use("/server", ar);
+app.use("/server", br);
+app.use("/server", cr);
+app.use("/server", dr);
+app.use("/server/fs", er);
+app.use("/server", fr);
+
+// HTTP + WS server
+const server = http.createServer(app);
+const wss = new WebSocket.Server({ noServer: true });
+
+// Client/stream bookkeeping
+const clients = new Map(); // map TID/containerId -> Set(ws)
+const logStreams = new Map(); // containerId -> { stream, refCount }
+const statsIntervals = new Map(); // containerId -> { intervalId, refCount }
+
+// --- Disk helpers (async) ---
+async function getFolderSize(dir) {
+  let total = 0;
+  try {
+    const entries = await fsPromises.readdir(dir, { withFileTypes: true });
+    for (const entry of entries) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) total += await getFolderSize(full);
+      else if (entry.isFile()) total += (await fsPromises.stat(full)).size;
+    }
+  } catch (err) {
+    // don't spam on missing directories — just return 0
+    // (but log for debugging)
+    if (err.code !== "ENOENT") console.error("getFolderSize error:", err);
+  }
+  return total;
 }
 
-function addClient(containerId, ws) {
-  const set = clients.get(containerId) || new Set();
+/**
+ * Resolve the TID / data.json entry for either:
+ * - Docker container ID (full ID)
+ * - or TID key passed directly
+ */
+function findDataEntryByContainerOrTid(containerOrTid) {
+  // if passed a TID key that exists directly in data.json
+  if (data[containerOrTid])
+    return { tid: containerOrTid, entry: data[containerOrTid] };
+
+  // try to find by containerId value
+  const found = Object.entries(data).find(
+    ([tid, entry]) => entry.containerId === containerOrTid
+  );
+  if (found) return { tid: found[0], entry: found[1] };
+
+  return null;
+}
+
+/**
+ * return GB used (number)
+ */
+async function getContainerDiskUsage(containerIdOrTid) {
+  const resolved = findDataEntryByContainerOrTid(containerIdOrTid);
+  if (!resolved) {
+    console.warn(
+      `[disk-check] data.json entry not found for '${containerIdOrTid}'`
+    );
+    return 0;
+  }
+  const { tid } = resolved;
+  const dir = path.join(__dirname, "data", tid);
+  const bytes = await getFolderSize(dir);
+  return bytes / 1e9;
+}
+
+// --- WS helpers ---
+function sendEvent(ws, event, payload) {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  try {
+    ws.send(JSON.stringify({ event, payload, ts: new Date().toISOString() }));
+  } catch (e) {
+    // swallow send errors
+    console.error("sendEvent error:", e);
+  }
+}
+
+function broadcastToContainer(containerIdOrTid, event, payload) {
+  // When broadcasting we allow containerId or TID as the key used in clients map
+  const set = clients.get(containerIdOrTid) || new Set();
+  for (const ws of set) sendEvent(ws, event, payload);
+}
+
+function addClientKey(key, ws) {
+  // key should be the containerId or TID the client will use consistently
+  const set = clients.get(key) || new Set();
   set.add(ws);
-  clients.set(containerId, set);
+  clients.set(key, set);
 }
 
-function removeClientFromAll(ws) {
-  for (const [containerId, set] of clients.entries()) {
+function removeClient(ws) {
+  for (const [key, set] of clients.entries()) {
     if (set.has(ws)) {
       set.delete(ws);
-      // If no more clients for this container, cleanup streams/intervals
       if (set.size === 0) {
-        clients.delete(containerId);
-        cleanupLogStream(containerId);
-        cleanupStatsInterval(containerId);
+        clients.delete(key);
+        cleanupLogStreamsByKey(key);
+        cleanupStatsByKey(key);
       }
     }
   }
 }
 
-// Cleanup helpers
-function cleanupLogStream(containerId) {
-  const entry = logStreams.get(containerId);
-  if (!entry) return;
-  entry.refCount--;
-  if (entry.refCount <= 0) {
-    try {
-      entry.stream.destroy();
-    } catch (e) {}
-    logStreams.delete(containerId);
+function cleanupLogStreamsByKey(key) {
+  // logStreams map is keyed by containerId (Docker ID). We will attempt both lookups.
+  const entry = logStreams.get(key);
+  if (entry) {
+    entry.refCount--;
+    if (entry.refCount <= 0) {
+      try {
+        entry.stream.destroy();
+      } catch (e) {}
+      logStreams.delete(key);
+    }
+    return;
+  }
+  // try to find by data.json mapping (if key is TID)
+  const resolved = findDataEntryByContainerOrTid(key);
+  if (resolved) {
+    const { entry } = resolved;
+    const cid = entry.containerId;
+    const e2 = logStreams.get(cid);
+    if (e2) {
+      e2.refCount--;
+      if (e2.refCount <= 0) {
+        try {
+          e2.stream.destroy();
+        } catch (e) {}
+        logStreams.delete(cid);
+      }
+    }
   }
 }
 
-function cleanupStatsInterval(containerId) {
-  const entry = statsIntervals.get(containerId);
-  if (!entry) return;
-  entry.refCount--;
-  if (entry.refCount <= 0) {
-    clearInterval(entry.intervalId);
-    statsIntervals.delete(containerId);
+function cleanupStatsByKey(key) {
+  const entry = statsIntervals.get(key);
+  if (entry) {
+    entry.refCount--;
+    if (entry.refCount <= 0) {
+      clearInterval(entry.intervalId);
+      statsIntervals.delete(key);
+    }
+    return;
+  }
+  const resolved = findDataEntryByContainerOrTid(key);
+  if (resolved) {
+    const cid = resolved.entry.containerId;
+    const e2 = statsIntervals.get(cid);
+    if (e2) {
+      e2.refCount--;
+      if (e2.refCount <= 0) {
+        clearInterval(e2.intervalId);
+        statsIntervals.delete(cid);
+      }
+    }
   }
 }
 
-// Stream logs (single broadcaster per container)
-function streamLogs(ws, container, containerId) {
-  addClient(containerId, ws);
+// --- Streams & actions ---
+// Stream logs: we send log lines as JSON events 'cmd' so client handles them in the cmd branch.
+async function streamLogs(ws, container, containerId) {
+  // containerId is Docker container ID, clients may have registered with the TID or containerId key
+  const resolved = findDataEntryByContainerOrTid(containerId);
+  const tid = resolved ? resolved.tid : containerId;
 
-  // If a log stream already exists, just increase refCount and return
+  // Disk check BEFORE attaching logs
+  const usage = await getContainerDiskUsage(containerId);
+  const allowed =
+    resolved && resolved.entry && typeof resolved.entry.disk === "number"
+      ? resolved.entry.disk
+      : Infinity;
+  console.log(
+    `[disk-check] streamLogs for ${containerId} (tid=${tid}): usage=${usage.toFixed(
+      3
+    )}GB allowed=${allowed === Infinity ? "∞" : allowed}`
+  );
+
+  addClientKey(tid, ws);
+
+  if (usage >= allowed) {
+    const info = await container.inspect().catch(() => null);
+    if (info && info.State && info.State.Running) {
+      // stop the container and broadcast to all clients for tid
+      try {
+        await container.kill();
+      } catch (e) {
+        /* ignore kill errors */
+      }
+      broadcastToContainer(
+        tid,
+        "power",
+        ansi("Node", "red", "Server disk exceed — container stopped.")
+      );
+    } else {
+      // just notify clients
+      broadcastToContainer(
+        tid,
+        "power",
+        ansi("Node", "red", "Server disk exceed — container blocked.")
+      );
+    }
+    return;
+  }
+
+  // if already streaming, increase refCount and return
   if (logStreams.has(containerId)) {
     logStreams.get(containerId).refCount++;
     return;
   }
 
-  // Create new log stream and broadcast to all clients for containerId
+  // Attach logs and broadcast 'cmd' events
   container.logs(
-    {
-      follow: true,
-      stdout: true,
-      stderr: true,
-      tail: 100,
-    },
+    { follow: true, stdout: true, stderr: true, tail: 100 },
     (err, stream) => {
-      if (err) {
-        sendEvent(ws, "error", err.message);
-        return;
-      }
+      if (err)
+        return sendEvent(
+          ws,
+          "error",
+          `Failed to attach logs: ${err.message || err}`
+        );
 
-      // Save stream ref
       logStreams.set(containerId, {
         stream,
-        refCount: (clients.get(containerId) || new Set()).size,
+        refCount: (clients.get(tid) || new Set()).size,
       });
 
-      stream.on("data", (chunk) => {
-        const text = chunk.toString("utf8");
-        // broadcast raw output (legacy behavior) and also tag as cmd/event if desired
-        // keep backward compatibility: plain text messages for logs
-        for (const c of clients.get(containerId) || []) {
-          if (c.readyState === WebSocket.OPEN) {
-            // If client expects JSON events, you can wrap; here we keep sending raw logs (as before)
-            c.send(text);
-          }
+       stream.on("data", (chunk) => {
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(chunk.toString("utf8"));
         }
       });
 
-      stream.on("error", (err) => {
-        broadcastToContainer(
-          containerId,
-          "error",
-          `Log stream error: ${err.message}`
-        );
-      });
 
-      stream.on("end", () => {
-        broadcastToContainer(containerId, "info", "Log stream ended");
-      });
+      stream.on("error", (err) =>
+        broadcastToContainer(tid, "error", `Log error: ${err.message}`)
+      );
+      if (!logStreams.get(containerId).stopped) {
+        broadcastToContainer(tid, "power", ansi("Node", "yellow", "Server marked as stopped"));
+        logStreams.get(containerId).stopped = true;
+      }
 
-      // When the stream is destroyed, ensure it's cleaned up
-      ws.once("close", () => {
-        cleanupLogStream(containerId);
-      });
+
+      ws.once("close", () => cleanupLogStreamsByKey(tid));
     }
   );
 }
 
-// Stream stats (per-container interval, reused)
+// Stream stats (reused interval per container)
 async function streamStats(ws, container, containerId) {
-  addClient(containerId, ws);
+  const resolved = findDataEntryByContainerOrTid(containerId);
+  const tid = resolved ? resolved.tid : containerId;
 
-  // If interval exists, just increment refCount
+  addClientKey(tid, ws);
   if (statsIntervals.has(containerId)) {
     statsIntervals.get(containerId).refCount++;
     return;
   }
 
-  // create interval
   const intervalId = setInterval(async () => {
-    const set = clients.get(containerId);
+    // if nobody listening, let the key cleanup handle it
+    const set = clients.get(tid);
     if (!set || set.size === 0) return;
 
     try {
-      const stats = await new Promise((resolve, reject) => {
+      const stats = await new Promise((resolve, reject) =>
         container.stats({ stream: false }, (err, s) =>
           err ? reject(err) : resolve(s)
-        );
-      });
-
-      const containerInfo = await container.inspect();
-      const payload = { stats, status: containerInfo.State.Status };
-
-      // broadcast structured stats payload
-      broadcastToContainer(containerId, "stats", payload);
+        )
+      );
+      // broadcast structured stats (client expects 'stats' event)
+      broadcastToContainer(tid, "stats", { stats });
     } catch (err) {
-      broadcastToContainer(containerId, "error", err.message);
+      broadcastToContainer(tid, "error", `Stats error: ${err.message}`);
     }
   }, 2000);
 
   statsIntervals.set(containerId, {
     intervalId,
-    refCount: (clients.get(containerId) || new Set()).size,
+    refCount: (clients.get(tid) || new Set()).size,
   });
+  ws.on("close", () => clearInterval(intervalId));
 }
 
-// Execute command - run via container.exec and return output to caller only
+// Execute a single command inside container — block if disk exceeded
 async function executeCommand(ws, container, command) {
+  const containerId = container.id;
+  const resolved = findDataEntryByContainerOrTid(containerId);
+  const tid = resolved ? resolved.tid : containerId;
+
+  const usage = await getContainerDiskUsage(containerId);
+  const allowed =
+    resolved && resolved.entry && typeof resolved.entry.disk === "number"
+      ? resolved.entry.disk
+      : Infinity;
+  console.log(
+    `[disk-check] exec for ${containerId} (tid=${tid}): usage=${usage.toFixed(
+      3
+    )}GB allowed=${allowed === Infinity ? "∞" : allowed}`
+  );
+
+  const info = await container.inspect().catch(() => null);
+  if (usage >= allowed) {
+    if (info && info.State && info.State.Running) {
+      try {
+        await container.kill();
+      } catch (e) {}
+    }
+    // notify all clients for tid
+    broadcastToContainer(
+      tid,
+      "power",
+      ansi("Node", "red", "Server disk exceed — commands blocked.")
+    );
+    return;
+  }
+
   try {
-    if (!command || typeof command !== "string")
-      return sendEvent(ws, "error", "Invalid command");
-
-    const exec = await container.exec({
-      Cmd: ["sh", "-lc", command],
-      AttachStdout: true,
-      AttachStderr: true,
-      Tty: false,
+    const stream = await container.attach({
+      stream: true,
+      stdin: true,
+      stdout: true,
+      stderr: true,
+      hijack: true,
     });
-
-    const stream = await exec.start({ Detach: false });
-
     stream.on("data", (chunk) => {
       sendEvent(ws, "cmd", chunk.toString("utf8"));
     });
-
-    stream.on("error", (err) => {
-      sendEvent(ws, "error", err.message);
-    });
-
-    stream.on("end", () => {
-      sendEvent(ws, "cmd", "[COMMAND OUTPUT END]");
-    });
+    stream.on("error", (err) =>
+      sendEvent(ws, "error", `Exec stream error: ${err.message}`)
+    );
+    stream.write(command + "\n");
+    stream.end();
   } catch (err) {
-    sendEvent(ws, "error", err.message);
+    sendEvent(ws, "error", `Failed to exec command: ${err.message}`);
   }
 }
 
-// Improved performPower: send broadcasts to container subscribers where helpful
 async function performPower(ws, container, action, containerId) {
+  const resolved = findDataEntryByContainerOrTid(containerId);
+  const tid = resolved ? resolved.tid : containerId;
+
+  const usage = await getContainerDiskUsage(containerId);
+  const allowed =
+    resolved?.entry?.disk ?? Infinity;
+
+  const info = await container.inspect().catch(() => null);
+
+  if ((action === "start" || action === "restart") && usage >= allowed) {
+    broadcastToContainer(
+      tid,
+      "power",
+      ansi("Node", "red", "Server disk exceed — container will not be started.")
+    );
+    return;
+  }
+
   try {
-    const info = await container.inspect();
-
     if (action === "start") {
-      if (info.State.Running)
-        return sendEvent(ws, "power", "Container is already running.");
-
+      if (info?.State?.Running) {
+        sendEvent(ws, "power", ansi("Node", "green", "Container already running."));
+        return;
+      }
+      broadcastToContainer(tid, "power", ansi("Node", "yellow", "Starting container..."));
       await container.start();
-      sendEvent(ws, "power", "Starting container...");
-      broadcastToContainer(containerId, "power", "Starting container...");
+      logStreams.delete(container.id);
       await waitForRunning(container, ws);
-    } else if (action === "stop") {
-      if (!info.State.Running)
-        return sendEvent(ws, "power", "Container is already stopped.");
+      
 
-      await container.kill();
-      sendEvent(ws, "power", "Container stopped successfully.");
-      broadcastToContainer(containerId, "power", "Container stopped");
+      // Attach logs for all clients after start
+      for (const c of clients.get(tid) || []) {
+        streamLogs(c, container, container.id, true); // `true` = force attach without disk check
+      }
+
     } else if (action === "restart") {
-      sendEvent(ws, "power", "Restarting container...");
-      broadcastToContainer(containerId, "power", "Restarting container...");
+      broadcastToContainer(tid, "power", ansi("Node", "yellow", "Restarting container..."));
       await container.restart();
+      logStreams.delete(container.id);
       await waitForRunning(container, ws);
-    } else {
-      throw new Error("Invalid power action.");
+
+      for (const c of clients.get(tid) || []) {
+        streamLogs(c, container, container.id, true);
+      }
+
+    } else if (action === "stop") {
+      if (!info?.State?.Running) {
+        sendEvent(ws, "power", ansi("Node", "red", "Container already stopped."));
+        return;
+      }
+      await container.kill();
+      broadcastToContainer(tid, "power", ansi("Node", "red", "Container stopped."));
     }
   } catch (err) {
-    sendEvent(ws, "error", err.message || "An unexpected error occurred.");
+    sendEvent(ws, "error", `Power action failed: ${err.message}`);
   }
 }
-
-// Wait for running then attach logs for requester (keeps old behavior)
 async function waitForRunning(container, ws) {
   try {
     let info;
@@ -304,73 +463,72 @@ async function waitForRunning(container, ws) {
       info = await container.inspect();
     } while (!info.State.Running);
 
-    // Attach logs and broadcast to all clients for this container
-    streamLogs(ws, container, container.id);
+    const resolved = findDataEntryByContainerOrTid(container.id);
+    const tid = resolved ? resolved.tid : container.id;
+
+    for (const c of clients.get(tid) || []) {
+      streamLogs(c, container, container.id);
+    }
   } catch (err) {
-    sendEvent(ws, "error", `Failed to attach logs: ${err.message}`);
+    ws.send(
+      JSON.stringify({
+        event: "error",
+        payload: `Failed to attach logs: ${err.message}`,
+      })
+    );
   }
 }
 
-// --- Authentication & connection lifecycle ---
-// require an auth message quickly or terminate
+// WebSocket connection lifecycle
 const AUTH_TIMEOUT = 5000;
-
-wss.on("connection", (ws, req) => {
+wss.on("connection", (ws) => {
   ws.isAuthenticated = false;
   ws.isAlive = true;
-  // auto-terminate if client doesn't auth within AUTH_TIMEOUT
-  const authTimer = setTimeout(() => {
-    if (!ws.isAuthenticated) {
-      ws.terminate();
-    }
-  }, AUTH_TIMEOUT);
 
+  const authTimer = setTimeout(() => {
+    if (!ws.isAuthenticated) ws.terminate();
+  }, AUTH_TIMEOUT);
   ws.on("pong", () => (ws.isAlive = true));
 
   ws.on("message", async (raw) => {
-    let data;
+    let msg;
     try {
-      data = JSON.parse(raw);
+      msg = JSON.parse(raw);
     } catch {
       return sendEvent(ws, "error", "Invalid JSON");
     }
 
-    // If not authenticated, only accept auth event
     if (!ws.isAuthenticated) {
-      if (data.event === "auth" && data.payload?.key === config.key) {
+      if (msg.event === "auth" && msg.payload?.key === config.key) {
         ws.isAuthenticated = true;
         clearTimeout(authTimer);
-        sendEvent(ws, "auth", { success: true });
-        return;
+        return sendEvent(ws, "auth", { success: true });
       } else {
-        // unauthorized - close with policy violation
         ws.close(1008, "Unauthorized");
         return;
       }
     }
 
-    // Authenticated: handle events
-    const { event, payload } = data;
+    const { event, payload } = msg;
     const containerId = payload?.containerId;
-    if (!containerId) return sendEvent(ws, "error", "containerId is required");
+    if (!containerId) return sendEvent(ws, "error", "containerId required");
 
-    // Basic containerId validation to avoid injection (adjust pattern as needed)
+    // validation
     if (
       typeof containerId !== "string" ||
       !/^[a-zA-Z0-9_.-]+$/.test(containerId)
-    ) {
+    )
       return sendEvent(ws, "error", "Invalid containerId");
-    }
 
     const container = docker.getContainer(containerId);
 
     try {
       switch (event) {
         case "logs":
-          streamLogs(ws, container, containerId);
+          await streamLogs(ws, container, containerId);
           break;
         case "stats":
-          streamStats(ws, container, containerId);
+          await streamStats(ws, container, containerId);
           break;
         case "cmd":
           await executeCommand(ws, container, payload.command);
@@ -384,24 +542,16 @@ wss.on("connection", (ws, req) => {
           sendEvent(ws, "error", "Unknown event");
       }
     } catch (err) {
-      sendEvent(ws, "error", err.message);
+      sendEvent(ws, "error", `Handler error: ${err.message}`);
     }
   });
 
-  ws.on("close", () => {
-    // cleanup all references
-    removeClientFromAll(ws);
-  });
-
-  ws.on("error", (err) => {
-    console.error("WS Error:", err);
-    removeClientFromAll(ws);
-  });
+  ws.on("close", () => removeClient(ws));
+  ws.on("error", () => removeClient(ws));
 });
 
-// heartbeat: detect dead connections
-const HEARTBEAT_INTERVAL = 30000;
-const hbInterval = setInterval(() => {
+// Heartbeat
+setInterval(() => {
   wss.clients.forEach((ws) => {
     if (!ws.isAlive) return ws.terminate();
     ws.isAlive = false;
@@ -409,209 +559,14 @@ const hbInterval = setInterval(() => {
       ws.ping();
     } catch (e) {}
   });
-}, HEARTBEAT_INTERVAL);
+}, 30000);
 
-// --- Upgrade HTTP to WebSocket (you had this already) ---
-server.on("upgrade", (req, socket, head) => {
-  // Optional: check origin here to restrict connections
-  wss.handleUpgrade(req, socket, head, (ws) => wss.emit("connection", ws, req));
-});
+// HTTP upgrade
+server.on("upgrade", (req, socket, head) =>
+  wss.handleUpgrade(req, socket, head, (ws) => wss.emit("connection", ws, req))
+);
 
-// Clean-up on shutdown
-process.on("SIGINT", () => {
-  clearInterval(hbInterval);
-  wss.close();
-  server.close(() => process.exit(0));
-});
-
-// --- WebSocket helpers ---
-function addClient(containerId, ws) {
-  if (!clients[containerId]) clients[containerId] = [];
-  clients[containerId].push(ws);
-}
-
-function streamLogs(ws, container, containerId) {
-  addClient(containerId, ws);
-
-  container.logs(
-    {
-      follow: true,
-      stdout: true,
-      stderr: true,
-      tail: 100,
-    },
-    (err, stream) => {
-      if (err) {
-        ws.send(JSON.stringify({ event: "error", payload: err.message }));
-        return;
-      }
-
-      stream.on("data", (chunk) => {
-        if (ws.readyState === WebSocket.OPEN) {
-          ws.send(chunk.toString("utf8"));
-        }
-      });
-
-      stream.on("error", (err) => {
-        if (ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({ event: "error", payload: err.message }));
-        }
-      });
-
-      ws.on("close", () => {
-        stream.destroy();
-      });
-    }
-  );
-}
-
-async function streamStats(ws, container, containerId) {
-  addClient(containerId, ws);
-
-  const interval = setInterval(async () => {
-    if (ws.readyState !== WebSocket.OPEN) return clearInterval(interval);
-
-    try {
-      // Fetch stats
-      const stats = await new Promise((resolve, reject) => {
-        container.stats({ stream: false }, (err, s) =>
-          err ? reject(err) : resolve(s)
-        );
-      });
-
-      // Fetch status
-      const containerInfo = await container.inspect();
-      const status = containerInfo.State.Status; // e.g., "running", "exited"
-
-      ws.send(
-        JSON.stringify({
-          event: "stats",
-          payload: {
-            stats,
-          },
-        })
-      );
-    } catch (err) {
-      ws.send(JSON.stringify({ event: "error", payload: err.message }));
-    }
-  }, 2000);
-
-  ws.on("close", () => clearInterval(interval));
-}
-
-async function executeCommand(ws, container, command) {
-  try {
-    const stream = await container.attach({
-      stream: true,
-      stdin: true,
-      stdout: true,
-      stderr: true,
-      hijack: true,
-    });
-
-    stream.on("data", (chunk) => {
-      if (ws.readyState === WebSocket.OPEN) {
-        ws.send(
-          JSON.stringify({ event: "cmd", payload: chunk.toString("utf8") })
-        );
-      }
-    });
-
-    stream.on("error", (err) => {
-      ws.send(JSON.stringify({ event: "error", payload: err.message }));
-    });
-
-    stream.write(command + "\n");
-    stream.end();
-  } catch (err) {
-    ws.send(JSON.stringify({ event: "error", payload: err.message }));
-  }
-}
-async function performPower(ws, container, action) {
-  try {
-    const info = await container.inspect();
-
-    if (action === "start") {
-      if (info.State.Running) {
-        return ws.send(
-          JSON.stringify({
-            event: "power",
-            payload: ansi("Node", "green", "Container is already running."),
-          })
-        );
-      }
-
-      await container.start();
-      ws.send(
-        JSON.stringify({
-          event: "power",
-          payload: ansi("Node", "green", "Starting container..."),
-        })
-      );
-
-      await waitForRunning(container, ws);
-    } else if (action === "stop") {
-      if (!info.State.Running) {
-        return ws.send(
-          JSON.stringify({
-            event: "power",
-            payload: ansi("Node", "red", "Container is already stopped."),
-          })
-        );
-      }
-
-      await container.kill();
-      ws.send(
-        JSON.stringify({
-          event: "power",
-          payload: ansi("Node", "red", "Container stopped successfully."),
-        })
-      );
-    } else if (action === "restart") {
-      ws.send(
-        JSON.stringify({
-          event: "power",
-          payload: ansi("power", "yellow", "Restarting container..."),
-        })
-      );
-
-      await container.restart();
-      await waitForRunning(container, ws);
-    } else {
-      throw new Error("Invalid power action.");
-    }
-  } catch (err) {
-    ws.send(
-      JSON.stringify({
-        event: "error",
-        payload: ansi(
-          "error",
-          "red",
-          err.message || "An unexpected error occurred."
-        ),
-      })
-    );
-  }
-}
-async function waitForRunning(container, ws) {
-  try {
-    let info;
-    do {
-      await new Promise((r) => setTimeout(r, 500));
-      info = await container.inspect();
-    } while (!info.State.Running);
-    streamLogs(ws, container, container.id);
-  } catch (err) {
-    ws.send(
-      JSON.stringify({
-        event: "error",
-        payload: `Failed to attach logs: ${err.message}`,
-      })
-    );
-  }
-}
-
-// --- REST endpoints ---
+// REST routes
 app.get("/health", async (req, res) => {
   const dockerRunning = await isDockerRunning();
   res.json({
@@ -620,22 +575,19 @@ app.get("/health", async (req, res) => {
     node: "alive",
   });
 });
-
-app.get("/stats", async (req, res) => {
+app.get("/stats", (req, res) => {
   try {
     const totalRam = os.totalmem();
     const freeRam = os.freemem();
-    const usedRam = totalRam - freeRam;
-    const totalCpu = os.cpus().length;
     res.json({
       totalRamGB: (totalRam / 1e9).toFixed(2),
-      usedRamGB: (usedRam / 1e9).toFixed(2),
-      totalCpuCores: totalCpu,
+      usedRamGB: ((totalRam - freeRam) / 1e9).toFixed(2),
+      totalCpuCores: os.cpus().length,
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// --- Start server ---
+// start
 server.listen(3000, () => console.log("Talorix API + WS running on port 3000"));
