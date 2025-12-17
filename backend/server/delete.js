@@ -1,54 +1,77 @@
-const express = require('express');
-const fs = require('fs');
+const fs = require('fs').promises; // use promises for async
 const path = require('path');
 const Docker = require('dockerode');
 
-const router = express.Router();
+const router = require('express').Router();
 const docker = new Docker();
-const DATA_FILE =  path.join(__dirname, '../../data.json');
+const DATA_FILE = path.join(__dirname, '../../data.json');
 
-if (!fs.existsSync(DATA_FILE)) fs.writeFileSync(DATA_FILE, JSON.stringify({}), 'utf8');
+// Ensure data file exists
+async function ensureDataFile() {
+  try {
+    await fs.access(DATA_FILE);
+  } catch {
+    await fs.writeFile(DATA_FILE, JSON.stringify({}), 'utf8');
+  }
+}
 
-const loadData = () => JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
-const saveData = (data) => fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2));
+const loadData = async () => {
+  await ensureDataFile();
+  const raw = await fs.readFile(DATA_FILE, 'utf8');
+  return JSON.parse(raw || '{}');
+};
 
-// DELETE /server/delete/:idt
-router.delete('delete/:idt', async (req, res) => {
+const saveData = async (data) => {
+  await fs.writeFile(DATA_FILE, JSON.stringify(data, null, 2), 'utf8');
+};
+
+async function deletesrvdata(idt) {
+  const containerDataPath = path.join(__dirname, `../../data/${idt}`);
+  try {
+    await fs.rm(containerDataPath, { recursive: true, force: true });
+  } catch (err) {
+    console.error(`Failed to delete container data at ${containerDataPath}:`, err);
+  }
+}
+
+// delete /server/delete/:idt
+router.delete('/delete/:idt', async (req, res) => {
   try {
     const { idt } = req.params;
-    const data = loadData();
+    const data = await loadData();
 
     if (!data[idt]) return res.status(404).json({ error: 'Unknown ID' });
 
+    // Delete container folder
+    await deletesrvdata(idt);
+
     const container = docker.getContainer(data[idt].containerId);
 
-    // Stop the container if running
+    // Stop container if running
     try {
       const info = await container.inspect();
       if (info.State.Running) {
         await container.stop();
       }
-    } catch (err) {
-      // ignore if container already stopped or doesn't exist
+    } catch {
+      // ignore
     }
 
-    // Remove the container
-    await container.remove({ force: true });
-
-    // Delete associated data folder
-    const containerDataPath = path.resolve('../../data', idt);
-    if (fs.existsSync(containerDataPath)) {
-      fs.rmSync(containerDataPath, { recursive: true, force: true });
+    // Remove container
+    try {
+      await container.remove({ force: true });
+    } catch {
+      // ignore if already removed
     }
 
     // Remove from data.json
     delete data[idt];
-    saveData(data);
+    await saveData(data);
 
     res.json({ status: 'ok', idt });
   } catch (err) {
+    console.error('Error deleting server:', err);
     res.status(500).json({ error: err.message });
   }
 });
-
 module.exports = router;
