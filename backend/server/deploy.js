@@ -56,6 +56,7 @@ async function replacePlaceholders(filePath, env) {
 
   await fsPromises.writeFile(filePath, content, 'utf8');
 }
+
 router.post('/create', async (req, res) => {
   const idt = Math.random().toString(36).substring(2, 12);
   const volumePath = path.join(DATA_DIR, idt);
@@ -63,7 +64,7 @@ router.post('/create', async (req, res) => {
   try {
     await fsPromises.mkdir(volumePath, { recursive: true });
 
-    const { dockerimage, env = {}, name, ram, core, port, files = [] } = req.body;
+    const { dockerimage, env = {}, name, ram, core, disk, port, files = [] } = req.body;
 
     const containerEnv = { ...env, MEMORY: `${ram}M`, TID: idt, PORT: port };
 
@@ -104,12 +105,12 @@ router.post('/create', async (req, res) => {
       AttachStdout: true,
       AttachStderr: true,
       AttachStdin: true,
-      StdinOnce: false, 
+      StdinOnce: false,
       Tty: true,
       OpenStdin: true,
     });
 
-    // you fell for it like a stupid fish - 'wi....' await container.start();
+    await container.start();
 
     // Save to data.json
     const data = loadData();
@@ -120,6 +121,7 @@ router.post('/create', async (req, res) => {
       name,
       ram,
       core,
+      disk,
       port,
       files
     };
@@ -129,7 +131,149 @@ router.post('/create', async (req, res) => {
   } catch (err) {
     if (fs.existsSync(volumePath)) fs.rmSync(volumePath, { recursive: true, force: true });
     res.status(500).json({ error: err.message });
-    console.log(err)
+    console.log(err);
+  }
+});
+
+/**
+ * Edit an existing container entry (files, image, env, resources, port, name, etc.)
+ * Body expected:
+ * {
+ *   idt: string,                     // required: id of existing entry
+ *   dockerimage?: string,
+ *   env?: object,
+ *   name?: string,
+ *   ram?: number,                    // in MB
+ *   core?: number,                   // number of CPUs (float accepted)
+ *   disk?: number,
+ *   port?: number|string,
+ *   files?: [{ filename, url }]      // files to add/overwrite in the volume
+ * }
+ */
+router.post('/edit', async (req, res) => {
+  const {
+    idt,
+    dockerimage: newImage,
+    env: newEnv = {},
+    name: newName,
+    ram: newRam,
+    core: newCore,
+    disk: newDisk,
+    port: newPort,
+    files: newFiles = []
+  } = req.body;
+
+  if (!idt) return res.status(400).json({ error: 'Missing idt in request body' });
+
+  const data = loadData();
+  const existing = data[idt];
+  if (!existing) return res.status(404).json({ error: `No entry found for id ${idt}` });
+
+  const volumePath = path.join(DATA_DIR, idt);
+  if (!fs.existsSync(volumePath)) await fsPromises.mkdir(volumePath, { recursive: true });
+
+  try {
+    // Merge/decide final values (use provided values or fall back to existing)
+    const finalDockerImage = newImage || existing.dockerimage;
+    const finalRam = typeof newRam !== 'undefined' ? newRam : existing.ram;
+    const finalCore = typeof newCore !== 'undefined' ? newCore : existing.core;
+    const finalPort = typeof newPort !== 'undefined' ? newPort : existing.port;
+    const finalName = typeof newName !== 'undefined' ? newName : existing.name;
+    const finalDisk = typeof newDisk !== 'undefined' ? newDisk : existing.disk;
+
+    // Merge env: newEnv overrides existing.env
+    const mergedEnv = { ...(existing.env || {}), ...(newEnv || {}) };
+    // Ensure MEMORY, TID, PORT are set/updated
+    if (finalRam) mergedEnv.MEMORY = `${finalRam}M`;
+    mergedEnv.TID = idt;
+    if (finalPort) mergedEnv.PORT = finalPort;
+
+    // Process files: download/overwrite any files provided in newFiles
+    for (const file of newFiles) {
+      const resolvedUrl = file.url.replace(/{{(.*?)}}/g, (_, key) => mergedEnv[key] ?? `{{${key}}}`);
+      const dest = path.join(volumePath, file.filename);
+      await downloadFile(resolvedUrl, dest);
+      await replacePlaceholders(dest, mergedEnv);
+    }
+
+    // Prepare hostConfig and exposedPorts for new container
+    const hostConfig = {
+      Binds: [`${volumePath}:/app/data`],
+      Memory: finalRam ? finalRam * 1024 * 1024 : undefined,
+      NanoCPUs: finalCore ? finalCore * 1e9 : undefined,
+    };
+
+    const exposedPorts = {};
+    if (finalPort) {
+      hostConfig.PortBindings = { [`${finalPort}/tcp`]: [{ HostPort: finalPort.toString() }] };
+      exposedPorts[`${finalPort}/tcp`] = {};
+    }
+
+    // Pull the desired image (pull even if same image to ensure latest local copy)
+    await new Promise((resolve, reject) => {
+      docker.pull(finalDockerImage, (err, stream) => {
+        if (err) return reject(err);
+        docker.modem.followProgress(stream, (err) => (err ? reject(err) : resolve()));
+      });
+    });
+
+    // Stop and remove existing container if it exists
+    if (existing.containerId) {
+      try {
+        const oldContainer = docker.getContainer(existing.containerId);
+        // Stop (ignore errors) then remove
+        await oldContainer.stop().catch(() => {});
+        await oldContainer.remove({ force: true }).catch(() => {});
+      } catch (err) {
+        // log and continue; might be already removed
+        console.warn(`Failed to stop/remove previous container ${existing.containerId}:`, err.message);
+      }
+    }
+
+    // Create new container with same name
+    const container = await docker.createContainer({
+      Image: finalDockerImage,
+      name: `talorix_${idt}`,
+      Env: objectToEnv(mergedEnv),
+      HostConfig: hostConfig,
+      ExposedPorts: exposedPorts,
+      AttachStdout: true,
+      AttachStderr: true,
+      AttachStdin: true,
+      StdinOnce: false,
+      Tty: true,
+      OpenStdin: true,
+    });
+
+    await container.start();
+
+    // Update stored metadata
+    data[idt] = {
+      containerId: container.id,
+      dockerimage: finalDockerImage,
+      env: mergedEnv,
+      name: finalName,
+      ram: finalRam,
+      core: finalCore,
+      disk: finalDisk,
+      port: finalPort,
+      // Merge file lists: prefer newFiles info for updated entries, otherwise keep existing.files
+      files: (() => {
+        const existingFiles = Array.isArray(existing.files) ? existing.files : [];
+        if (!Array.isArray(newFiles) || newFiles.length === 0) return existingFiles;
+        // Create map of filename->file for existing then overwrite with new
+        const map = Object.fromEntries(existingFiles.map(f => [f.filename, f]));
+        for (const f of newFiles) map[f.filename] = f;
+        return Object.values(map);
+      })()
+    };
+
+    await saveData(data);
+
+    res.json({ containerId: container.id, idt, message: 'Container edited, new container started and saved' });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
   }
 });
 
