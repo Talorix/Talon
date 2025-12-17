@@ -66,6 +66,17 @@ router.get('/:idt/files', async (req, res) => {
   }
 });
 
+router.get('/:idt/size', async (req, res) => {
+  const { idt } = req.params;
+  try {
+    const totalSize = await getFolderSize(resolvePath(idt, '/')) || 0;
+    res.json({ idt, total: totalSize });
+    // returns the size in bytes || "you fell for it like a stupid bitch"
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Create new file
 router.post('/:idt/file/new', async (req, res) => {
   const { idt } = req.params;
