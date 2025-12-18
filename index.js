@@ -1,3 +1,4 @@
+// index.js — Talorix API + WS (cleaned + fixed disk-check + consistent events)
 // Alpha Release v1, Report bugs to ma5z_
 
 const express = require("express");
@@ -221,37 +222,91 @@ function cleanupStatsByKey(key) {
 // --- Streams & actions ---
 // Stream logs: the guy who sends log to the panel ;3
 async function streamLogs(ws, container, containerId) {
+  // containerId is Docker container ID, clients may have registered with the TID or containerId key
   const resolved = findDataEntryByContainerOrTid(containerId);
   const tid = resolved ? resolved.tid : containerId;
 
-  addClientKey(tid, ws);
-
+  // Disk check BEFORE attaching logs
   const usage = await getContainerDiskUsage(containerId);
-  const allowed = resolved?.entry?.disk ?? Infinity;
+  const allowed =
+    resolved && resolved.entry && typeof resolved.entry.disk === "number"
+      ? resolved.entry.disk
+      : Infinity;
+  console.log(
+    `[disk-check] streamLogs for ${containerId} (tid=${tid}): usage=${usage.toFixed(
+      3
+    )}GB allowed=${allowed === Infinity ? "∞" : allowed}`
+  );
 
-  console.log(`[disk-check] streamLogs for ${containerId} (tid=${tid}): usage=${usage.toFixed(3)}GB allowed=${allowed === Infinity ? "∞" : allowed}`);
+  addClientKey(tid, ws);
 
   if (usage >= allowed) {
     const info = await container.inspect().catch(() => null);
-    const msg = info?.State?.Running ? "Server disk exceed — container stopped." : "Server disk exceed — container blocked.";
-    if (info?.State?.Running) await container.kill().catch(() => {});
-    broadcastToContainer(tid, "power", ansi("Node", "red", msg));
+    if (info && info.State && info.State.Running) {
+      // stop the container and broadcast to all clients for tid
+      try {
+        await container.kill();
+      } catch (e) {
+        /* ignore kill errors */
+      }
+      broadcastToContainer(
+        tid,
+        "power",
+        ansi("Node", "red", "Server disk exceed — container stopped.")
+      );
+    } else {
+      // just notify clients
+      broadcastToContainer(
+        tid,
+        "power",
+        ansi("Node", "red", "Server disk exceed — container blocked.")
+      );
+    }
     return;
   }
 
-  // the motherfucker bitch you asshole
-  if (!logStreams.has(containerId)) {
-    const stream = await container.logs({ follow: true, stdout: true, stderr: true, tail: 100 });
-    logStreams.set(containerId, { stream, refCount: 1 });
-
-    stream.on("data", (chunk) => broadcastToContainer(tid, "cmd", chunk.toString("utf8")));
-    stream.on("error", (err) => broadcastToContainer(tid, "error", `Log error: ${err.message}`));
-    stream.on("end", () => logStreams.delete(containerId));
-  } else {
+  // if already streaming, increase refCount and return
+  if (logStreams.has(containerId)) {
     logStreams.get(containerId).refCount++;
+    return;
   }
-}
 
+  // Attach logs and broadcast 'cmd' events
+  container.logs(
+    { follow: true, stdout: true, stderr: true, tail: 100 },
+    (err, stream) => {
+      if (err)
+        return sendEvent(
+          ws,
+          "error",
+          `Failed to attach logs: ${err.message || err}`
+        );
+
+      logStreams.set(containerId, {
+        stream,
+        refCount: (clients.get(tid) || new Set()).size,
+      });
+
+       stream.on("data", (chunk) => {
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(chunk.toString("utf8"));
+        }
+      });
+
+
+      stream.on("error", (err) =>
+        broadcastToContainer(tid, "error", `Log error: ${err.message}`)
+      );
+      if (!logStreams.get(containerId).stopped) {
+        broadcastToContainer(tid, "power", ansi("Node", "yellow", "Server marked as stopped"));
+        logStreams.get(containerId).stopped = true;
+      }
+
+
+      ws.once("close", () => cleanupLogStreamsByKey(tid));
+    }
+  );
+}
 
 // Stream stats 
 // the guy who is unemployed
