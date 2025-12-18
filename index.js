@@ -1,4 +1,3 @@
-// index.js — Talorix API + WS (cleaned + fixed disk-check + consistent events)
 // Alpha Release v1, Report bugs to ma5z_
 
 const express = require("express");
@@ -16,6 +15,7 @@ const cr = require("./backend/server/action.js");
 const dr = require("./backend/server/delete.js");
 const er = require("./backend/server/filesystem.js");
 const fr = require("./backend/server/reinstall.js");
+const gr = require("./backend/server/network.js");
 
 const data = require("./data.json");
 const config = require("./config.json");
@@ -62,7 +62,7 @@ app.use("/server", cr);
 app.use("/server", dr);
 app.use("/server/fs", er);
 app.use("/server", fr);
-
+app.use("/server/network", gr);
 // HTTP + WS server
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ noServer: true });
@@ -219,95 +219,42 @@ function cleanupStatsByKey(key) {
 }
 
 // --- Streams & actions ---
-// Stream logs: we send log lines as JSON events 'cmd' so client handles them in the cmd branch.
+// Stream logs: the guy who sends log to the panel ;3
 async function streamLogs(ws, container, containerId) {
-  // containerId is Docker container ID, clients may have registered with the TID or containerId key
   const resolved = findDataEntryByContainerOrTid(containerId);
   const tid = resolved ? resolved.tid : containerId;
 
-  // Disk check BEFORE attaching logs
-  const usage = await getContainerDiskUsage(containerId);
-  const allowed =
-    resolved && resolved.entry && typeof resolved.entry.disk === "number"
-      ? resolved.entry.disk
-      : Infinity;
-  console.log(
-    `[disk-check] streamLogs for ${containerId} (tid=${tid}): usage=${usage.toFixed(
-      3
-    )}GB allowed=${allowed === Infinity ? "∞" : allowed}`
-  );
-
   addClientKey(tid, ws);
+
+  const usage = await getContainerDiskUsage(containerId);
+  const allowed = resolved?.entry?.disk ?? Infinity;
+
+  console.log(`[disk-check] streamLogs for ${containerId} (tid=${tid}): usage=${usage.toFixed(3)}GB allowed=${allowed === Infinity ? "∞" : allowed}`);
 
   if (usage >= allowed) {
     const info = await container.inspect().catch(() => null);
-    if (info && info.State && info.State.Running) {
-      // stop the container and broadcast to all clients for tid
-      try {
-        await container.kill();
-      } catch (e) {
-        /* ignore kill errors */
-      }
-      broadcastToContainer(
-        tid,
-        "power",
-        ansi("Node", "red", "Server disk exceed — container stopped.")
-      );
-    } else {
-      // just notify clients
-      broadcastToContainer(
-        tid,
-        "power",
-        ansi("Node", "red", "Server disk exceed — container blocked.")
-      );
-    }
+    const msg = info?.State?.Running ? "Server disk exceed — container stopped." : "Server disk exceed — container blocked.";
+    if (info?.State?.Running) await container.kill().catch(() => {});
+    broadcastToContainer(tid, "power", ansi("Node", "red", msg));
     return;
   }
 
-  // if already streaming, increase refCount and return
-  if (logStreams.has(containerId)) {
+  // the motherfucker bitch you asshole
+  if (!logStreams.has(containerId)) {
+    const stream = await container.logs({ follow: true, stdout: true, stderr: true, tail: 100 });
+    logStreams.set(containerId, { stream, refCount: 1 });
+
+    stream.on("data", (chunk) => broadcastToContainer(tid, "cmd", chunk.toString("utf8")));
+    stream.on("error", (err) => broadcastToContainer(tid, "error", `Log error: ${err.message}`));
+    stream.on("end", () => logStreams.delete(containerId));
+  } else {
     logStreams.get(containerId).refCount++;
-    return;
   }
-
-  // Attach logs and broadcast 'cmd' events
-  container.logs(
-    { follow: true, stdout: true, stderr: true, tail: 100 },
-    (err, stream) => {
-      if (err)
-        return sendEvent(
-          ws,
-          "error",
-          `Failed to attach logs: ${err.message || err}`
-        );
-
-      logStreams.set(containerId, {
-        stream,
-        refCount: (clients.get(tid) || new Set()).size,
-      });
-
-       stream.on("data", (chunk) => {
-        if (ws.readyState === WebSocket.OPEN) {
-          ws.send(chunk.toString("utf8"));
-        }
-      });
-
-
-      stream.on("error", (err) =>
-        broadcastToContainer(tid, "error", `Log error: ${err.message}`)
-      );
-      if (!logStreams.get(containerId).stopped) {
-        broadcastToContainer(tid, "power", ansi("Node", "yellow", "Server marked as stopped"));
-        logStreams.get(containerId).stopped = true;
-      }
-
-
-      ws.once("close", () => cleanupLogStreamsByKey(tid));
-    }
-  );
 }
 
-// Stream stats (reused interval per container)
+
+// Stream stats 
+// the guy who is unemployed
 async function streamStats(ws, container, containerId) {
   const resolved = findDataEntryByContainerOrTid(containerId);
   const tid = resolved ? resolved.tid : containerId;
@@ -344,6 +291,7 @@ async function streamStats(ws, container, containerId) {
 }
 
 // Execute a single command inside container — block if disk exceeded
+// the guy who executes /sex true
 async function executeCommand(ws, container, command) {
   const containerId = container.id;
   const resolved = findDataEntryByContainerOrTid(containerId);
@@ -397,6 +345,7 @@ async function executeCommand(ws, container, command) {
   }
 }
 
+//the guy who turns on ur jenny mod server
 async function performPower(ws, container, action, containerId) {
   const resolved = findDataEntryByContainerOrTid(containerId);
   const tid = resolved ? resolved.tid : containerId;
@@ -455,6 +404,7 @@ async function performPower(ws, container, action, containerId) {
     sendEvent(ws, "error", `Power action failed: ${err.message}`);
   }
 }
+// the guy who wait for you for no reason hes unemployed anyways
 async function waitForRunning(container, ws) {
   try {
     let info;
@@ -479,7 +429,7 @@ async function waitForRunning(container, ws) {
   }
 }
 
-// WebSocket connection lifecycle
+// the guy who is a guy
 const AUTH_TIMEOUT = 5000;
 wss.on("connection", (ws) => {
   ws.isAuthenticated = false;
@@ -550,7 +500,7 @@ wss.on("connection", (ws) => {
   ws.on("error", () => removeClient(ws));
 });
 
-// Heartbeat
+// Heartbeat ehh? these guys have heartbeat, we dont even have a heart
 setInterval(() => {
   wss.clients.forEach((ws) => {
     if (!ws.isAlive) return ws.terminate();
@@ -561,12 +511,12 @@ setInterval(() => {
   });
 }, 30000);
 
-// HTTP upgrade
+// HTTP upgrade, like your blowjob going to missionary
 server.on("upgrade", (req, socket, head) =>
   wss.handleUpgrade(req, socket, head, (ws) => wss.emit("connection", ws, req))
 );
 
-// REST routes
+// REST routes, these are employed by mucrosuft cumpany
 app.get("/health", async (req, res) => {
   const dockerRunning = await isDockerRunning();
   res.json({
@@ -589,5 +539,8 @@ app.get("/stats", (req, res) => {
   }
 });
 
-// start
+// start, setup the goon chair jarvis
 server.listen(3000, () => console.log("Talorix API + WS running on port 3000"));
+
+
+// YOU FELL FOR IT LIKE A FUCKING STUPID FISH
