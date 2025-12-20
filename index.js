@@ -348,6 +348,7 @@ async function streamStats(ws, container, containerId) {
 // Execute a single command inside container — block if disk exceeded
 // the guy who executes /sex true
 async function executeCommand(ws, container, command) {
+  try {
   const containerId = container.id;
   const resolved = findDataEntryByContainerOrTid(containerId);
   const tid = resolved ? resolved.tid : containerId;
@@ -378,8 +379,6 @@ async function executeCommand(ws, container, command) {
     );
     return;
   }
-
-  try {
     const stream = await container.attach({
       stream: true,
       stdin: true,
@@ -402,6 +401,7 @@ async function executeCommand(ws, container, command) {
 
 //the guy who turns on ur jenny mod server
 async function performPower(ws, container, action, containerId) {
+  try {
   const resolved = findDataEntryByContainerOrTid(containerId);
   const tid = resolved ? resolved.tid : containerId;
 
@@ -419,8 +419,6 @@ async function performPower(ws, container, action, containerId) {
     );
     return;
   }
-
-  try {
     if (action === "start") {
       if (info?.State?.Running) {
         sendEvent(ws, "power", ansi("Node", "green", "Container already running."));
@@ -461,26 +459,40 @@ async function performPower(ws, container, action, containerId) {
 }
 // the guy who wait for you for no reason hes unemployed anyways
 async function waitForRunning(container, ws) {
+  const resolved = findDataEntryByContainerOrTid(container.id);
+  const tid = resolved ? resolved.tid : container.id;
+
+  let info;
   try {
-    let info;
-    do {
+    for (let attempts = 0; attempts < 20; attempts++) {
+      try {
+        info = await container.inspect();
+        if (info.State && info.State.Running) break;
+      } catch (err) {
+        console.error("waitForRunning inspect failed:", err.message);
+      }
       await new Promise((r) => setTimeout(r, 500));
-      info = await container.inspect();
-    } while (!info.State.Running);
+    }
 
-    const resolved = findDataEntryByContainerOrTid(container.id);
-    const tid = resolved ? resolved.tid : container.id;
+    if (!info || !info.State.Running) {
+      broadcastToContainer(
+        tid,
+        "error",
+        "Container failed to reach running state."
+      );
+      return;
+    }
 
+    // Attach logs safely
     for (const c of clients.get(tid) || []) {
-      streamLogs(c, container, container.id);
+      try {
+        streamLogs(c, container, container.id);
+      } catch (err) {
+        console.error("Failed to stream logs:", err);
+      }
     }
   } catch (err) {
-    ws.send(
-      JSON.stringify({
-        event: "error",
-        payload: `Failed to attach logs: ${err.message}`,
-      })
-    );
+    console.error("waitForRunning fatal error:", err);
   }
 }
 
@@ -584,10 +596,26 @@ app.get("/stats", (req, res) => {
   try {
     const totalRam = os.totalmem();
     const freeRam = os.freemem();
+    const cpus = os.cpus();
+    const load = os.loadavg(); // 1, 5, 15 minutes
+    const uptime = os.uptime(); // seconds
+
     res.json({
-      totalRamGB: (totalRam / 1e9).toFixed(2),
-      usedRamGB: ((totalRam - freeRam) / 1e9).toFixed(2),
-      totalCpuCores: os.cpus().length,
+      stats: {
+        totalRamGB: (totalRam / 1e9).toFixed(2),
+        usedRamGB: ((totalRam - freeRam) / 1e9).toFixed(2),
+        totalCpuCores: cpus.length,
+        cpuModel: cpus[0]?.model || "unknown",
+        cpuSpeed: cpus[0]?.speed || "unknown",
+        osType: os.type(),
+        osPlatform: os.platform(),
+        osArch: os.arch(),
+        osRelease: os.release(),
+        uptime: `${Math.floor(uptime / 3600)}h ${Math.floor((uptime % 3600) / 60)}m`,
+        load1: load[0].toFixed(2),
+        load5: load[1].toFixed(2),
+        load15: load[2].toFixed(2),
+      }
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
