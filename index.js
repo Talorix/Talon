@@ -298,11 +298,9 @@ async function streamLogs(ws, container, containerId) {
         broadcastToContainer(tid, "error", `Log error: ${err.message}`)
       );
       if (!logStreams.get(containerId).stopped) {
-        broadcastToContainer(tid, "power", ansi("Node", "yellow", "Server marked as stopped"));
+        // broadcastToContainer(tid, "power", ansi("Node", "yellow", "Server marked as stopped"));
         logStreams.get(containerId).stopped = true;
       }
-
-
       ws.once("close", () => cleanupLogStreamsByKey(tid));
     }
   );
@@ -428,11 +426,10 @@ async function performPower(ws, container, action, containerId) {
       await container.start();
       logStreams.delete(container.id);
       await waitForRunning(container, ws);
-      
 
       // Attach logs for all clients after start
       for (const c of clients.get(tid) || []) {
-        streamLogs(c, container, container.id, true); // `true` = force attach without disk check
+       // streamLogs(c, container, container.id, true); // `true` = force attach without disk check
       }
 
     } else if (action === "restart") {
