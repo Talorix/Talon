@@ -1,4 +1,6 @@
+// index.js — Talorix API + WS (cleaned + fixed disk-check + consistent events)
 // Alpha Release v1, Report bugs to ma5z_
+
 const express = require("express");
 const http = require("http");
 const WebSocket = require("ws");
@@ -175,10 +177,7 @@ async function getFolderSize(dir) {
  * - or TID key passed directly
  */
 function findDataEntryByContainerOrTid(containerOrTid) {
-  // if passed a TID key that exists directly in data.json
   if (data[containerOrTid]) return { tid: containerOrTid, entry: data[containerOrTid] };
-
-  // try to find by containerId value
   const found = Object.entries(data).find(([tid, entry]) => entry.containerId === containerOrTid);
   if (found) return { tid: found[0], entry: found[1] };
 
