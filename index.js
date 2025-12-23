@@ -1,6 +1,3 @@
-// index.js — Talorix API + WS (cleaned + fixed disk-check + consistent events)
-// Alpha Release v1, Report bugs to ma5z_
-
 const express = require("express");
 const http = require("http");
 const WebSocket = require("ws");
@@ -49,6 +46,17 @@ async function isDockerRunning() {
   }
 }
 
+async function isPanelRunning(panelUrl) {
+  try {
+    const response = await fetch(panelUrl, { method: "GET", timeout: 5000 });
+    return true;
+  } catch (err) {
+    console.error('\x1b[31mPanel is not reachable is the Talorix panel online?')
+    process.exit(1);
+  }
+}
+
+isPanelRunning(config.panel);
 /**
  * Recreate container for a given TID:
  * - pull latest image
@@ -682,6 +690,10 @@ app.get("/health", async (req, res) => {
     node: "alive",
   });
 });
+app.get("/version", async (req, res) => {
+  const version = '0.1-alpha-dev';
+  res.json({ version });
+});
 app.get("/stats", (req, res) => {
   try {
     const totalRam = os.totalmem();
@@ -713,6 +725,6 @@ app.get("/stats", (req, res) => {
 });
 
 // start, setup the goon chair jarvis
-server.listen(3000, () => console.log("Talorix API + WS running on port 3000"));
+server.listen(config.port, () => console.log("Talorix API + WS running on port "+ config.port));
 
 // YOU FELL FOR IT LIKE A FUCKING STUPID FISH
