@@ -15,9 +15,19 @@ const er = require("./backend/server/filesystem.js");
 const fr = require("./backend/server/reinstall.js");
 const gr = require("./backend/server/network.js");
 
-const data = require("./data.json");
+const dataPath = path.join(__dirname, "data.json");
 const config = require("./config.json");
+const data = require(dataPath);
 
+async function ensureDataFile() {
+  try {
+    await fsPromises.access(dataPath);
+  } catch {
+    await fsPromises.writeFile(dataPath, JSON.stringify({}, null, 2), "utf8");
+  }
+}
+
+ensureDataFile();
 const app = express();
 app.use(express.json());
 
@@ -51,7 +61,9 @@ async function isPanelRunning(panelUrl) {
     const response = await fetch(panelUrl, { method: "GET", timeout: 5000 });
     return true;
   } catch (err) {
-    console.error('\x1b[31mPanel is not reachable is the Talorix panel online?')
+    console.error(
+      "\x1b[31mPanel is not reachable is the Talorix panel online?"
+    );
     process.exit(1);
   }
 }
@@ -77,7 +89,9 @@ async function recreateContainer(tid) {
   await new Promise((resolve, reject) => {
     docker.pull(entry.dockerimage, (err, stream) => {
       if (err) return reject(err);
-      docker.modem.followProgress(stream, (err) => (err ? reject(err) : resolve()));
+      docker.modem.followProgress(stream, (err) =>
+        err ? reject(err) : resolve()
+      );
     });
   });
 
@@ -133,14 +147,18 @@ async function recreateContainer(tid) {
 
   // update containerId in memory and on disk
   entry.containerId = container.id;
-  await fsPromises.writeFile(path.join(__dirname, "data.json"), JSON.stringify(data, null, 2));
+  await fsPromises.writeFile(
+    path.join(__dirname, "data.json"),
+    JSON.stringify(data, null, 2)
+  );
 
   return container;
 }
 
 // API key middleware
 app.use((req, res, next) => {
-  if (req.query.key !== config.key) return res.status(401).json({ error: "Invalid key" });
+  if (req.query.key !== config.key)
+    return res.status(401).json({ error: "Invalid key" });
   next();
 });
 
@@ -185,10 +203,16 @@ async function getFolderSize(dir) {
  * - or TID key passed directly
  */
 function findDataEntryByContainerOrTid(containerOrTid) {
-  if (data[containerOrTid]) return { tid: containerOrTid, entry: data[containerOrTid] };
-  const found = Object.entries(data).find(([tid, entry]) => entry.containerId === containerOrTid);
-  if (found) return { tid: found[0], entry: found[1] };
+  const found = Object.entries(data).find(
+    ([_, entry]) =>
+      entry.containerId &&
+      (entry.containerId === containerOrTid ||
+        entry.containerId.startsWith(containerOrTid))
+  );
 
+  if (found) return { tid: found[0], entry: found[1] };
+  if (data[containerOrTid])
+    return { tid: containerOrTid, entry: data[containerOrTid] };
   return null;
 }
 
@@ -198,7 +222,9 @@ function findDataEntryByContainerOrTid(containerOrTid) {
 async function getContainerDiskUsage(containerIdOrTid) {
   const resolved = findDataEntryByContainerOrTid(containerIdOrTid);
   if (!resolved) {
-    console.warn(`[disk-check] data.json entry not found for '${containerIdOrTid}'`);
+    console.warn(
+      `[disk-check] data.json entry not found for '${containerIdOrTid}'`
+    );
     return 0;
   }
   const { tid } = resolved;
@@ -229,7 +255,6 @@ function broadcastToContainer(containerTidOrId, event, payload) {
   }
   for (const ws of recipients) sendEvent(ws, event, payload);
 }
-
 
 function addClientKey(key, ws) {
   // key should be the TID the client will use consistently
@@ -330,16 +355,23 @@ async function streamLogs(ws, container, requestedContainerId) {
   // requestedContainerId may be a TID or containerId; resolve to tid + current containerId
   const resolved = findDataEntryByContainerOrTid(requestedContainerId);
   const tid = resolved ? resolved.tid : requestedContainerId;
-  const currentContainerId = resolved ? resolved.entry.containerId : requestedContainerId;
+  const currentContainerId = resolved
+    ? resolved.entry.containerId
+    : requestedContainerId;
 
   // always use current container object (it may differ from 'container' passed in)
   container = docker.getContainer(currentContainerId);
 
   // Disk check BEFORE attaching logs
   const usage = await getContainerDiskUsage(tid);
-  const allowed = resolved && resolved.entry && typeof resolved.entry.disk === "number" ? resolved.entry.disk : Infinity;
+  const allowed =
+    resolved && resolved.entry && typeof resolved.entry.disk === "number"
+      ? resolved.entry.disk
+      : Infinity;
   console.log(
-    `[disk-check] streamLogs for ${currentContainerId} (tid=${tid}): usage=${usage.toFixed(3)}GB allowed=${allowed === Infinity ? "∞" : allowed}`
+    `[disk-check] streamLogs for ${currentContainerId} (tid=${tid}): usage=${usage.toFixed(
+      3
+    )}GB allowed=${allowed === Infinity ? "∞" : allowed}`
   );
 
   addClientKey(tid, ws);
@@ -353,10 +385,18 @@ async function streamLogs(ws, container, requestedContainerId) {
       } catch (e) {
         /* ignore kill errors */
       }
-      broadcastToContainer(tid, "power", ansi("Node", "red", "Server disk exceed — container stopped."));
+      broadcastToContainer(
+        tid,
+        "power",
+        ansi("Node", "red", "Server disk exceed — container stopped.")
+      );
     } else {
       // just notify clients
-      broadcastToContainer(tid, "power", ansi("Node", "red", "Server disk exceed — container blocked."));
+      broadcastToContainer(
+        tid,
+        "power",
+        ansi("Node", "red", "Server disk exceed — container blocked.")
+      );
     }
     return;
   }
@@ -369,45 +409,63 @@ async function streamLogs(ws, container, requestedContainerId) {
 
   // Attach logs and broadcast raw chunks to all clients for that tid.
   // IMPORTANT: we deliberately broadcast raw chunk strings (not JSON) to preserve existing client behavior.
-  container.logs({ follow: true, stdout: true, stderr: true, tail: 100 }, (err, stream) => {
-    if (err) return sendEvent(ws, "error", `Failed to attach logs: ${err.message || err}`);
+  container.logs(
+    { follow: true, stdout: true, stderr: true, tail: 100 },
+    (err, stream) => {
+      if (err)
+        return sendEvent(
+          ws,
+          "error",
+          `Failed to attach logs: ${err.message || err}`
+        );
 
-    // store stream in map
-    logStreams.set(currentContainerId, { stream, refCount: (clients.get(tid) || new Set()).size });
+      // store stream in map
+      logStreams.set(currentContainerId, {
+        stream,
+        refCount: (clients.get(tid) || new Set()).size,
+      });
 
-    // broadcast to all clients connected to this tid as raw text
-    const onData = (chunk) => {
-      const raw = chunk.toString("utf8");
-      const set = clients.get(tid) || new Set();
-      for (const client of set) {
-        if (client.readyState === WebSocket.OPEN) {
-          try {
-            client.send(raw);
-          } catch (e) {
-            // ignore per-client send errors
+      // broadcast to all clients connected to this tid as raw text
+      const onData = (chunk) => {
+        const raw = chunk.toString("utf8");
+        const set = clients.get(tid) || new Set();
+        for (const client of set) {
+          if (client.readyState === WebSocket.OPEN) {
+            try {
+              client.send(raw);
+            } catch (e) {
+              // ignore per-client send errors
+            }
           }
         }
+      };
+
+      stream.on("data", onData);
+
+      stream.on("error", (err) =>
+        broadcastToContainer(tid, "error", `Log error: ${err.message}`)
+      );
+
+      stream.on("end", () => {
+        // stream ended — notify clients
+        broadcastToContainer(
+          tid,
+          "power",
+          ansi("Node", "gray", "Log stream ended.")
+        );
+        // remove from map if present (cleanup will also handle refcounts)
+        if (logStreams.has(currentContainerId))
+          logStreams.delete(currentContainerId);
+      });
+
+      if (!logStreams.get(currentContainerId).stopped) {
+        logStreams.get(currentContainerId).stopped = true;
       }
-    };
 
-    stream.on("data", onData);
-
-    stream.on("error", (err) => broadcastToContainer(tid, "error", `Log error: ${err.message}`));
-
-    stream.on("end", () => {
-      // stream ended — notify clients
-      broadcastToContainer(tid, "power", ansi("Node", "gray", "Log stream ended."));
-      // remove from map if present (cleanup will also handle refcounts)
-      if (logStreams.has(currentContainerId)) logStreams.delete(currentContainerId);
-    });
-
-    if (!logStreams.get(currentContainerId).stopped) {
-      logStreams.get(currentContainerId).stopped = true;
+      // when this ws closes, let general cleanup handle refcounts and possibly destroy the stream
+      ws.once("close", () => cleanupLogStreamsByKey(tid));
     }
-
-    // when this ws closes, let general cleanup handle refcounts and possibly destroy the stream
-    ws.once("close", () => cleanupLogStreamsByKey(tid));
-  });
+  );
 }
 
 // Stream stats
@@ -416,7 +474,9 @@ async function streamStats(ws, container, requestedContainerId) {
   // requestedContainerId may be TID or containerId; resolve to tid + current containerId
   const resolved = findDataEntryByContainerOrTid(requestedContainerId);
   const tid = resolved ? resolved.tid : requestedContainerId;
-  const currentContainerId = resolved ? resolved.entry.containerId : requestedContainerId;
+  const currentContainerId = resolved
+    ? resolved.entry.containerId
+    : requestedContainerId;
 
   // always use current container object
   container = docker.getContainer(currentContainerId);
@@ -436,7 +496,9 @@ async function streamStats(ws, container, requestedContainerId) {
 
     try {
       const stats = await new Promise((resolve, reject) =>
-        container.stats({ stream: false }, (err, s) => (err ? reject(err) : resolve(s)))
+        container.stats({ stream: false }, (err, s) =>
+          err ? reject(err) : resolve(s)
+        )
       );
       // broadcast structured stats (client expects 'stats' event)
       broadcastToContainer(tid, "stats", { stats });
@@ -450,7 +512,10 @@ async function streamStats(ws, container, requestedContainerId) {
     }
   }, 2000);
 
-  statsIntervals.set(currentContainerId, { intervalId, refCount: (clients.get(tid) || new Set()).size });
+  statsIntervals.set(currentContainerId, {
+    intervalId,
+    refCount: (clients.get(tid) || new Set()).size,
+  });
 
   // ensure interval cleared when ws closes
   ws.on("close", () => {
@@ -466,12 +531,21 @@ async function executeCommand(ws, container, command, requestedContainerId) {
     // resolve to tid/current container
     const resolved = findDataEntryByContainerOrTid(requestedContainerId);
     const tid = resolved ? resolved.tid : requestedContainerId;
-    const currentContainerId = resolved ? resolved.entry.containerId : requestedContainerId;
+    const currentContainerId = resolved
+      ? resolved.entry.containerId
+      : requestedContainerId;
     container = docker.getContainer(currentContainerId);
 
     const usage = await getContainerDiskUsage(tid);
-    const allowed = resolved && resolved.entry && typeof resolved.entry.disk === "number" ? resolved.entry.disk : Infinity;
-    console.log(`[disk-check] exec for ${currentContainerId} (tid=${tid}): usage=${usage.toFixed(3)}GB allowed=${allowed === Infinity ? "∞" : allowed}`);
+    const allowed =
+      resolved && resolved.entry && typeof resolved.entry.disk === "number"
+        ? resolved.entry.disk
+        : Infinity;
+    console.log(
+      `[disk-check] exec for ${currentContainerId} (tid=${tid}): usage=${usage.toFixed(
+        3
+      )}GB allowed=${allowed === Infinity ? "∞" : allowed}`
+    );
 
     const info = await container.inspect().catch(() => null);
     if (usage >= allowed) {
@@ -481,15 +555,27 @@ async function executeCommand(ws, container, command, requestedContainerId) {
         } catch (e) {}
       }
       // notify all clients for tid
-      broadcastToContainer(tid, "power", ansi("Node", "red", "Server disk exceed — commands blocked."));
+      broadcastToContainer(
+        tid,
+        "power",
+        ansi("Node", "red", "Server disk exceed — commands blocked.")
+      );
       return;
     }
 
-    const stream = await container.attach({ stream: true, stdin: true, stdout: true, stderr: true, hijack: true });
+    const stream = await container.attach({
+      stream: true,
+      stdin: true,
+      stdout: true,
+      stderr: true,
+      hijack: true,
+    });
     stream.on("data", (chunk) => {
       sendEvent(ws, "cmd", chunk.toString("utf8"));
     });
-    stream.on("error", (err) => sendEvent(ws, "error", `Exec stream error: ${err.message}`));
+    stream.on("error", (err) =>
+      sendEvent(ws, "error", `Exec stream error: ${err.message}`)
+    );
     stream.write(command + "\n");
     stream.end();
   } catch (err) {
@@ -518,12 +604,24 @@ async function performPower(ws, container, action, requestedContainerId) {
     const info = await container.inspect().catch(() => null);
 
     if ((action === "start" || action === "restart") && usage >= allowed) {
-      broadcastToContainer(tid, "power", ansi("Node", "red", "Server disk exceed — container will not be started."));
+      broadcastToContainer(
+        tid,
+        "power",
+        ansi(
+          "Node",
+          "red",
+          "Server disk exceed — container will not be started."
+        )
+      );
       return;
     }
 
     if (action === "start" || action === "restart") {
-      broadcastToContainer(tid, "power", ansi("Node", "yellow", "Pulling the latest docker image..."));
+      broadcastToContainer(
+        tid,
+        "power",
+        ansi("Node", "yellow", "Pulling the latest docker image...")
+      );
 
       // CLEANUP: destroy old log streams and stats bound to the previous container id
       if (currentContainerId) {
@@ -544,14 +642,26 @@ async function performPower(ws, container, action, requestedContainerId) {
         streamStats(c, newContainer, newContainer.id);
       }
 
-      broadcastToContainer(tid, "power", ansi("Node", "green", "Starting the container."));
+      broadcastToContainer(
+        tid,
+        "power",
+        ansi("Node", "green", "Starting the container.")
+      );
     } else if (action === "stop") {
       if (!info?.State?.Running) {
-        sendEvent(ws, "power", ansi("Node", "red", "Container already stopped."));
+        sendEvent(
+          ws,
+          "power",
+          ansi("Node", "red", "Container already stopped.")
+        );
         return;
       }
       await container.kill();
-      broadcastToContainer(tid, "power", ansi("Node", "red", "Container stopped."));
+      broadcastToContainer(
+        tid,
+        "power",
+        ansi("Node", "red", "Container stopped.")
+      );
     }
   } catch (err) {
     sendEvent(ws, "error", `Power action failed: ${err.message}`);
@@ -576,7 +686,11 @@ async function waitForRunning(container, ws) {
     }
 
     if (!info || !info.State.Running) {
-      broadcastToContainer(tid, "error", "Container failed to reach running state.");
+      broadcastToContainer(
+        tid,
+        "error",
+        "Container failed to reach running state."
+      );
       return;
     }
 
@@ -625,16 +739,22 @@ wss.on("connection", (ws) => {
 
     const { event, payload } = msg;
     const providedContainerId = payload?.containerId;
-    if (!providedContainerId) return sendEvent(ws, "error", "containerId required");
+    if (!providedContainerId)
+      return sendEvent(ws, "error", "containerId required");
 
     // validation
-    if (typeof providedContainerId !== "string" || !/^[a-zA-Z0-9_.-]+$/.test(providedContainerId))
+    if (
+      typeof providedContainerId !== "string" ||
+      !/^[a-zA-Z0-9_.-]+$/.test(providedContainerId)
+    )
       return sendEvent(ws, "error", "Invalid containerId");
 
     // Resolve TID + authoritative current containerId before calling handlers.
     const resolved = findDataEntryByContainerOrTid(providedContainerId);
     const tid = resolved ? resolved.tid : providedContainerId;
-    const currentContainerId = resolved ? resolved.entry.containerId : providedContainerId;
+    const currentContainerId = resolved
+      ? resolved.entry.containerId
+      : providedContainerId;
     const container = docker.getContainer(currentContainerId);
 
     try {
@@ -646,12 +766,22 @@ wss.on("connection", (ws) => {
           await streamStats(ws, container, providedContainerId);
           break;
         case "cmd":
-          await executeCommand(ws, container, payload.command, providedContainerId);
+          await executeCommand(
+            ws,
+            container,
+            payload.command,
+            providedContainerId
+          );
           break;
         case "power:start":
         case "power:stop":
         case "power:restart":
-          await performPower(ws, container, event.split(":")[1], providedContainerId);
+          await performPower(
+            ws,
+            container,
+            event.split(":")[1],
+            providedContainerId
+          );
           break;
         default:
           sendEvent(ws, "error", "Unknown event");
@@ -691,7 +821,7 @@ app.get("/health", async (req, res) => {
   });
 });
 app.get("/version", async (req, res) => {
-  const version = '0.1-alpha-dev';
+  const version = "0.1-alpha-dev";
   res.json({ version });
 });
 app.get("/stats", (req, res) => {
@@ -713,7 +843,9 @@ app.get("/stats", (req, res) => {
         osPlatform: os.platform(),
         osArch: os.arch(),
         osRelease: os.release(),
-        uptime: `${Math.floor(uptime / 3600)}h ${Math.floor((uptime % 3600) / 60)}m`,
+        uptime: `${Math.floor(uptime / 3600)}h ${Math.floor(
+          (uptime % 3600) / 60
+        )}m`,
         load1: load[0].toFixed(2),
         load5: load[1].toFixed(2),
         load15: load[2].toFixed(2),
@@ -725,6 +857,8 @@ app.get("/stats", (req, res) => {
 });
 
 // start, setup the goon chair jarvis
-server.listen(config.port, () => console.log("Talorix API + WS running on port "+ config.port));
+server.listen(config.port, () =>
+  console.log("Talorix API + WS running on port " + config.port)
+);
 
 // YOU FELL FOR IT LIKE A FUCKING STUPID FISH
