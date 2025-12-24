@@ -6,7 +6,7 @@ const docker = new Docker();
 const os = require("os");
 const path = require("path");
 const fsPromises = require("fs").promises;
-
+const fs = require('fs');
 const ar = require("./backend/server/deploy.js");
 const br = require("./backend/server/info.js");
 const cr = require("./backend/server/action.js");
@@ -16,22 +16,82 @@ const fr = require("./backend/server/reinstall.js");
 const gr = require("./backend/server/network.js");
 
 const dataPath = path.join(__dirname, "data.json");
+const DATA_PATH = path.join(__dirname, "data.json"); // why i hate niggas
 const config = require("./config.json");
-const data = require(dataPath);
 
-async function ensureDataFile() {
+
+let writeLock = Promise.resolve();
+
+async function readData() {
   try {
-    await fsPromises.access(dataPath);
-  } catch {
-    await fsPromises.writeFile(dataPath, JSON.stringify({}, null, 2), "utf8");
+    const content = await fsPromises.readFile(DATA_PATH, "utf8");
+    return content ? JSON.parse(content) : {};
+  } catch (err) {
+    if (err.code === "ENOENT") return {};
+    throw err;
   }
 }
 
-ensureDataFile();
+/**
+ * Atomic write + in-memory update + serialized via writeLock
+ * newData must be a plain object
+ */
+async function writeData(newData) {
+  // serialize writes
+  writeLock = writeLock.then(async () => {
+    const tmp = DATA_PATH + ".tmp";
+    await fsPromises.writeFile(tmp, JSON.stringify(newData, null, 2), "utf8");
+    await fsPromises.rename(tmp, DATA_PATH);
+    // update in-memory reference only after successful disk write
+    data = newData;
+  }, async (err) => {
+    // In case previous writeLock rejected, still run this write
+    const tmp = DATA_PATH + ".tmp";
+    await fsPromises.writeFile(tmp, JSON.stringify(newData, null, 2), "utf8");
+    await fsPromises.rename(tmp, DATA_PATH);
+    data = newData;
+  });
+
+  await writeLock;
+}
+function ensureDataFile() {
+  return new Promise((resolve, reject) => {
+    fs.access(dataPath, (err) => {
+      if (err) {
+        fs.writeFile(dataPath, JSON.stringify({}, null, 2), "utf8", (err) => {
+          if (err) return reject(err);
+          resolve("File created");
+        });
+      } else {
+        resolve("File exists"); 
+      }
+    });
+  });
+}
+let data;
+(async () => {
+  try {
+    await ensureDataFile(); 
+    data = await readData();
+  } catch (err) {
+    process.exit(1);
+  }
+})();
+
+setInterval(async () => {
+  try {
+    const diskData = await readData();
+    if (JSON.stringify(diskData) !== JSON.stringify(data)) {
+      data = diskData;
+    }
+  } catch (err) {
+    console.error("reloadData error:", err);
+  }
+}, 5000); 
+
 const app = express();
 app.use(express.json());
 
-// ANSI helpers (for payloads)
 const ANSI = {
   reset: "\x1b[0m",
   red: "\x1b[31m",
@@ -80,7 +140,8 @@ isPanelRunning(config.panel);
  * BEFORE calling this function to avoid races.
  */
 async function recreateContainer(tid) {
-  const entry = data[tid];
+  const current = await readData();
+  const entry = current[tid];
   if (!entry) throw new Error("Data entry not found");
 
   const volumePath = path.join(__dirname, "data", tid);
@@ -145,12 +206,10 @@ async function recreateContainer(tid) {
 
   await container.start();
 
-  // update containerId in memory and on disk
-  entry.containerId = container.id;
-  await fsPromises.writeFile(
-    path.join(__dirname, "data.json"),
-    JSON.stringify(data, null, 2)
-  );
+  const latest = await readData();
+  if (!latest[tid]) latest[tid] = entry; 
+  latest[tid].containerId = container.id;
+  await writeData(latest);
 
   return container;
 }
