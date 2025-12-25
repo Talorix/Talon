@@ -529,13 +529,11 @@ async function streamLogs(ws, container, requestedContainerId) {
 
 // Stream stats
 // the guy who is unemployed
+// Stream stats — now includes container uptime
 async function streamStats(ws, container, requestedContainerId) {
-  // requestedContainerId may be TID or containerId; resolve to tid + current containerId
   const resolved = findDataEntryByContainerOrTid(requestedContainerId);
   const tid = resolved ? resolved.tid : requestedContainerId;
-  const currentContainerId = resolved
-    ? resolved.entry.containerId
-    : requestedContainerId;
+  const currentContainerId = resolved ? resolved.entry.containerId : requestedContainerId;
 
   // always use current container object
   container = docker.getContainer(currentContainerId);
@@ -548,19 +546,54 @@ async function streamStats(ws, container, requestedContainerId) {
     return;
   }
 
+  // helper to format seconds -> "1h 2m 3s"
+  function formatUptime(seconds) {
+    seconds = Math.max(0, Math.floor(seconds));
+    const h = Math.floor(seconds / 3600);
+    const m = Math.floor((seconds % 3600) / 60);
+    const s = seconds % 60;
+    const parts = [];
+    if (h) parts.push(`${h}h`);
+    if (m) parts.push(`${m}m`);
+    parts.push(`${s}s`);
+    return parts.join(" ");
+  }
+
   const intervalId = setInterval(async () => {
-    // if nobody listening, let the key cleanup handle it
     const set = clients.get(tid);
     if (!set || set.size === 0) return;
 
     try {
+      // get non-streaming stats
       const stats = await new Promise((resolve, reject) =>
-        container.stats({ stream: false }, (err, s) =>
-          err ? reject(err) : resolve(s)
-        )
+        container.stats({ stream: false }, (err, s) => (err ? reject(err) : resolve(s)))
       );
+
+      // inspect container to get StartedAt (for uptime)
+      let uptimeSeconds = 0;
+      let uptime = "0s";
+      try {
+        const info = await container.inspect();
+        const startedAt = info?.State?.StartedAt;
+        if (startedAt && startedAt !== "0001-01-01T00:00:00Z") {
+          const startedMs = Date.parse(startedAt);
+          if (!Number.isNaN(startedMs)) {
+            uptimeSeconds = Math.floor((Date.now() - startedMs) / 1000);
+            if (uptimeSeconds < 0) uptimeSeconds = 0;
+            uptime = formatUptime(uptimeSeconds);
+          }
+        }
+      } catch (inspectErr) {
+        // ignore inspect error but include error field if needed
+        // console.error("inspect error for uptime:", inspectErr.message);
+      }
+
       // broadcast structured stats (client expects 'stats' event)
-      broadcastToContainer(tid, "stats", { stats });
+      broadcastToContainer(tid, "stats", {
+        stats,
+        uptimeSeconds,
+        uptime, // human readable
+      });
     } catch (err) {
       // if container no longer exists, cleanup this interval
       if (err && err.statusCode === 404) {
@@ -578,7 +611,6 @@ async function streamStats(ws, container, requestedContainerId) {
 
   // ensure interval cleared when ws closes
   ws.on("close", () => {
-    // decrement refCount safely
     cleanupStatsByKey(tid);
   });
 }
