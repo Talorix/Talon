@@ -130,10 +130,6 @@ router.post('/reinstall/:idt', async (req, res) => {
       Env: objectToEnv(mergedEnv),
       HostConfig: hostConfig,
       ExposedPorts: exposedPorts,
-      AttachStdout: true,
-      AttachStderr: true,
-      AttachStdin: true,
-      StdinOnce: false,
       Tty: true,
       OpenStdin: true,
     });
