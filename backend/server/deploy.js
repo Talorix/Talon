@@ -102,10 +102,6 @@ router.post('/create', async (req, res) => {
       Env: objectToEnv(containerEnv),
       HostConfig: hostConfig,
       ExposedPorts: exposedPorts,
-      AttachStdout: true,
-      AttachStderr: true,
-      AttachStdin: true,
-      StdinOnce: false,
       Tty: true,
       OpenStdin: true,
     });
