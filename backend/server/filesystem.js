@@ -113,16 +113,31 @@ router.post('/:idt/folder/new', async (req, res) => {
 router.get('/:idt/file/content', async (req, res) => {
   const { idt } = req.params;
   const relPath = req.query.location;
-  if (!relPath) return res.status(400).json({ error: 'location query param is required' });
+
+  if (!relPath) {
+    return res.status(400).json({ error: 'location query param is required' });
+  }
 
   try {
     const filePath = resolvePath(idt, relPath);
     const content = await fsPromises.readFile(filePath, 'utf8');
-    res.json({ content });
+
+    return res.json({ content });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    // File does not exist
+    if (err.code === 'ENOENT') {
+      return res.status(404).json({
+        error: 'File not found',
+      });
+    }
+
+    // Other filesystem errors
+    return res.status(500).json({
+      error: err.message,
+    });
   }
 });
+
 
 // Delete file
 router.delete('/:idt/file/delete', async (req, res) => {
