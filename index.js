@@ -19,9 +19,14 @@ const dataPath = path.join(__dirname, "data.json");
 const DATA_PATH = path.join(__dirname, "data.json"); // why i hate niggas
 const config = require("./config.json");
 
-
 let writeLock = Promise.resolve();
 
+if (os.platform() === 'win32') {
+  console.warn(
+    "⚠️ Talon will cause errors since you're running it on Windows.\n" +
+    "Please use a Linux host to run containers safely."
+  );
+};
 async function readData() {
   try {
     const content = await fsPromises.readFile(DATA_PATH, "utf8");
@@ -529,7 +534,6 @@ async function streamLogs(ws, container, requestedContainerId) {
 
 // Stream stats
 // the guy who is unemployed
-// Stream stats — now includes container uptime
 async function streamStats(ws, container, requestedContainerId) {
   const resolved = findDataEntryByContainerOrTid(requestedContainerId);
   const tid = resolved ? resolved.tid : requestedContainerId;
@@ -592,7 +596,7 @@ async function streamStats(ws, container, requestedContainerId) {
       broadcastToContainer(tid, "stats", {
         stats,
         uptimeSeconds,
-        uptime, // human readable
+        uptime, 
       });
     } catch (err) {
       // if container no longer exists, cleanup this interval
@@ -949,7 +953,7 @@ app.get("/stats", (req, res) => {
 
 // start, setup the goon chair jarvis
 server.listen(config.port, () =>
-  console.log("Talorix API + WS running on port " + config.port)
+  console.log("Talon is successfully hosted on " + config.port)
 );
 
 // YOU FELL FOR IT LIKE A FUCKING STUPID FISH
