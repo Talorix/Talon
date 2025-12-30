@@ -1,7 +1,7 @@
 {
-  "name": "talorixnode",
-  "version": "0.0.1",
-  "description": "node for talorix",
+  "name": "Talon",
+  "version": "0.1-dev",
+  "description": "Node aka daemon for talorix panel",
   "keywords": [
     "node"
   ],
@@ -11,6 +11,9 @@
   "main": "index.js",
   "scripts": {
     "configure": "node e/c.js"
+  },
+  "bin": {
+    "talon": "./index.js"
   },
   "dependencies": {
     "dockerode": "^4.0.9",
