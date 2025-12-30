@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 const express = require("express");
 const http = require("http");
 const WebSocket = require("ws");
@@ -68,7 +69,7 @@ function ensureDataFile() {
           resolve("File created");
         });
       } else {
-        resolve("File exists"); 
+        resolve("File exists");
       }
     });
   });
@@ -76,7 +77,7 @@ function ensureDataFile() {
 let data;
 (async () => {
   try {
-    await ensureDataFile(); 
+    await ensureDataFile();
     data = await readData();
   } catch (err) {
     process.exit(1);
@@ -92,7 +93,7 @@ setInterval(async () => {
   } catch (err) {
     console.error("reloadData error:", err);
   }
-}, 5000); 
+}, 5000);
 
 const app = express();
 app.use(express.json());
@@ -165,8 +166,8 @@ async function recreateContainer(tid) {
   if (entry.containerId) {
     try {
       const old = docker.getContainer(entry.containerId);
-      await old.stop().catch(() => {});
-      await old.remove({ force: true }).catch(() => {});
+      await old.stop().catch(() => { });
+      await old.remove({ force: true }).catch(() => { });
     } catch (e) {
       // ignore; might already be gone
     }
@@ -187,8 +188,8 @@ async function recreateContainer(tid) {
     Array.isArray(entry.ports) && entry.ports.length
       ? entry.ports
       : entry.port
-      ? [entry.port]
-      : [];
+        ? [entry.port]
+        : [];
 
   for (const p of ports) {
     exposedPorts[`${p}/tcp`] = {};
@@ -212,7 +213,7 @@ async function recreateContainer(tid) {
   await container.start();
 
   const latest = await readData();
-  if (!latest[tid]) latest[tid] = entry; 
+  if (!latest[tid]) latest[tid] = entry;
   latest[tid].containerId = container.id;
   await writeData(latest);
 
@@ -346,7 +347,7 @@ function cleanupLogStreamsByContainerId(containerId) {
   if (!entry) return;
   try {
     entry.stream.destroy();
-  } catch (e) {}
+  } catch (e) { }
   logStreams.delete(containerId);
 }
 
@@ -366,7 +367,7 @@ function cleanupLogStreamsByKey(key) {
     if (entry.refCount <= 0) {
       try {
         entry.stream.destroy();
-      } catch (e) {}
+      } catch (e) { }
       logStreams.delete(key);
     }
     return;
@@ -382,7 +383,7 @@ function cleanupLogStreamsByKey(key) {
       if (e2.refCount <= 0) {
         try {
           e2.stream.destroy();
-        } catch (e) {}
+        } catch (e) { }
         logStreams.delete(cid);
       }
     }
@@ -596,7 +597,7 @@ async function streamStats(ws, container, requestedContainerId) {
       broadcastToContainer(tid, "stats", {
         stats,
         uptimeSeconds,
-        uptime, 
+        uptime,
       });
     } catch (err) {
       // if container no longer exists, cleanup this interval
@@ -647,7 +648,7 @@ async function executeCommand(ws, container, command, requestedContainerId) {
       if (info && info.State && info.State.Running) {
         try {
           await container.kill();
-        } catch (e) {}
+        } catch (e) { }
       }
       // notify all clients for tid
       broadcastToContainer(
@@ -671,6 +672,10 @@ async function executeCommand(ws, container, command, requestedContainerId) {
     stream.on("error", (err) =>
       sendEvent(ws, "error", `Exec stream error: ${err.message}`)
     );
+    if (command === '^C') {
+      stream.write('\x03');
+      stream.end();
+    }
     stream.write(command + "\n");
     stream.end();
   } catch (err) {
@@ -897,7 +902,7 @@ setInterval(() => {
     ws.isAlive = false;
     try {
       ws.ping();
-    } catch (e) {}
+    } catch (e) { }
   });
 }, 30000);
 
@@ -951,9 +956,33 @@ app.get("/stats", (req, res) => {
   }
 });
 
-// start, setup the goon chair jarvis
-server.listen(config.port, () =>
-  console.log("Talon is successfully hosted on " + config.port)
-);
+async function getVersion() {
+  const res = await fetch("https://ma4z.is-a.dev/repo/version_library.json");
+  const data = await res.json();
+  version = data["hydren:sr"]["talorix"]["daemon"];
+  const ascii = `
+ _____     _             
+|_   _|_ _| | ___  _ __  
+  | |/ _\` | |/ _ \\| '_ \\ 
+  | | (_| | | (_) | | | |   ${version}
+  |_|\\__,_|_|\\___/|_| |_|
 
+Copyright © %s Talon Project
+
+Website:  https://taloix.io
+Source:   https://github.com/talorix/talon
+`;
+  const gray = '\x1b[90m'
+  const reset = '\x1b[0m';
+  const asciiWithColor = ascii.replace(version, reset + version + gray);
+  console.log(gray + asciiWithColor + reset, new Date().getFullYear());
+  return;
+}
+async function start() {
+  await getVersion();
+  server.listen(config.port, () =>
+    console.log("\x1b[36mTalon has been booted on " + config.port)
+  );
+}
+start();
 // YOU FELL FOR IT LIKE A FUCKING STUPID FISH
