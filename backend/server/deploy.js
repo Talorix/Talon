@@ -57,6 +57,14 @@ async function replacePlaceholders(filePath, env) {
   await fsPromises.writeFile(filePath, content, 'utf8');
 }
 
+function genPass(length = 12) {
+  const chars = 'abcdef0123456789';
+  let result = '';
+  for (let i = 0; i < length; i++) {
+    result += chars[Math.floor(Math.random() * chars.length)];
+  }
+  return result;
+}
 router.post('/create', async (req, res) => {
   const idt = Math.random().toString(36).substring(2, 12);
   const volumePath = path.join(DATA_DIR, idt);
@@ -113,6 +121,7 @@ router.post('/create', async (req, res) => {
     data[idt] = {
       containerId: container.id,
       dockerimage,
+      ftpPassword: genPass(),
       env: containerEnv,
       name,
       ram,
@@ -123,7 +132,7 @@ router.post('/create', async (req, res) => {
     };
     await saveData(data);
 
-    res.json({ containerId: container.id, idt, message: 'Container started and saved successfully' });
+    res.json({ containerId: container.id, idt, ftppass: data[idt].ftpPassword, message: 'Container started and saved successfully' });
   } catch (err) {
     if (fs.existsSync(volumePath)) fs.rmSync(volumePath, { recursive: true, force: true });
     res.status(500).json({ error: err.message });

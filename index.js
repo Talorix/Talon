@@ -15,7 +15,10 @@ const dr = require("./backend/server/delete.js");
 const er = require("./backend/server/filesystem.js");
 const fr = require("./backend/server/reinstall.js");
 const gr = require("./backend/server/network.js");
-
+const hr = require("./backend/server/ftp.js");
+setTimeout(() => {
+  hr.startFtpServer();
+}, 1000);
 const dataPath = path.join(__dirname, "data.json");
 const DATA_PATH = path.join(__dirname, "data.json"); // why i hate niggas
 const config = require("./config.json");

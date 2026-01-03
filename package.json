@@ -19,6 +19,7 @@
     "dockerode": "^4.0.9",
     "express": "^5.2.1",
     "express-ws": "^5.0.2",
+    "ftp-srv": "^4.6.3",
     "multer": "^2.0.2"
   }
 }

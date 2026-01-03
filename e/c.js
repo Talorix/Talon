@@ -27,17 +27,17 @@ const getArg = (name) => {
 const key = getArg('key');
 const panel = getArg('panel');
 const port = getArg('port');
-
+const ftpPort = getArg('ftpport');
 // At least one argument should be provided
 if (!key && !panel && !port) {
-  console.error('Usage: npm run configure -- [--key {key}] [--panel {panelUrl}] [--port {port}]');
+  console.error('Usage: npm run configure -- [--key {key}] [--panel {panelUrl}] [--port {port}] [--ftpport {ftpPort}]');
   process.exit(1);
 }
 
 if (key) config.key = key;
 if (panel) config.panel = panel;
 if (port) config.port = port;
-
+if (ftpPort) config.ftpport = ftpPort;
 fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
 console.log('Configuration have been updated successfully!');
 console.log(config);

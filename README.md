@@ -1,2 +1,2 @@
-# TalorixNode
-Node of Talorix which allows to create containers, manage container files etc.
+# Talon
+### to install it just check https://talorix.io

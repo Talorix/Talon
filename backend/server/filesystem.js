@@ -217,12 +217,8 @@ router.post('/:idt/file/upload', upload.single('file'), async (req, res) => {
   }
 
   try {
-    // Resolve full path inside container
     const uploadPath = resolvePath(idt, path.join(relPath, req.file.originalname));
-
-    // Write file from buffer
     await fsPromises.writeFile(uploadPath, req.file.buffer);
-
     res.json({ message: 'File uploaded', location: uploadPath });
   } catch (err) {
     res.status(500).json({ error: err.message });
