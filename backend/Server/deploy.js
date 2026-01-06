@@ -93,7 +93,8 @@ router.post('/create', async (req, res) => {
   (async () => {
     try {
       await fsPromises.mkdir(volumePath, { recursive: true });
-      const { dockerimage, env = {}, name, ram, core, disk, port, files = [], startCmd, stopCmd } = req.body;
+
+      const { dockerimage, env = {}, name, ram, core, disk, port, files = [] } = req.body;
       const containerEnv = { ...env, MEMORY: `${ram}M`, TID: idt, PORT: port };
       for (const file of files) {
         const resolvedUrl = file.url.replace(/{{(.*?)}}/g, (_, key) =>
@@ -125,7 +126,8 @@ router.post('/create', async (req, res) => {
           );
         });
       });
-      const startupCommand = startCmd.replace(/{{(.*?)}}/g, (_, key) => containerEnv[key] ?? `{{${key}}}`);
+
+      // Create container
       const container = await docker.createContainer({
         Image: dockerimage,
         name: `talorix_${idt}`,
