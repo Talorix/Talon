@@ -36,7 +36,12 @@ const loadData = () => {
 };
 
 const saveData = async (data) => {
-  await fsPromises.writeFile(DATA_FILE, JSON.stringify(data, null, 2), 'utf8');
+  try {
+    await fsPromises.writeFile(DATA_FILE, JSON.stringify(data, null, 2), 'utf8');
+  } catch (error) {
+    console.error('Failed to save data:', error);
+    throw error;
+  }
 };
 
 async function replacePlaceholders(filePath, env) {
@@ -56,6 +61,8 @@ function genPass(length = 12) {
   return result;
 }
 
+const si = new Set();
+
 /**
  * Create a new container entry
  * Body expected:
@@ -69,13 +76,13 @@ function genPass(length = 12) {
  *   port?: number|string,
  *   files?: [{ filename, url }]      // files to download into the volume
  * }
- */ 
+ */
 router.post('/create', async (req, res) => {
   const idt = Math.random().toString(36).substring(2, 12);
   const volumePath = path.join(DATA_DIR, idt);
   const fcid = 'pending_' + crypto.randomBytes(16).toString('hex');
   const ftpPassword = genPass();
-
+  si.add(idt);
   res.json({
     containerId: fcid,
     idt,
@@ -86,10 +93,8 @@ router.post('/create', async (req, res) => {
   (async () => {
     try {
       await fsPromises.mkdir(volumePath, { recursive: true });
-
       const { dockerimage, env = {}, name, ram, core, disk, port, files = [] } = req.body;
       const containerEnv = { ...env, MEMORY: `${ram}M`, TID: idt, PORT: port };
-
       for (const file of files) {
         const resolvedUrl = file.url.replace(/{{(.*?)}}/g, (_, key) =>
           containerEnv[key] ?? `{{${key}}}`
@@ -112,8 +117,6 @@ router.post('/create', async (req, res) => {
         };
         exposedPorts[`${port}/tcp`] = {};
       }
-
-      // Pull image
       await new Promise((resolve, reject) => {
         docker.pull(dockerimage, (err, stream) => {
           if (err) return reject(err);
@@ -122,8 +125,6 @@ router.post('/create', async (req, res) => {
           );
         });
       });
-
-      // Create container
       const container = await docker.createContainer({
         Image: dockerimage,
         name: `talorix_${idt}`,
@@ -133,11 +134,11 @@ router.post('/create', async (req, res) => {
         Tty: true,
         OpenStdin: true,
       });
-
       await container.start();
       const data = loadData();
+
       data[idt] = {
-        containerId: container.id, 
+        containerId: container.id,
         dockerimage,
         ftpPassword,
         env: containerEnv,
@@ -149,11 +150,9 @@ router.post('/create', async (req, res) => {
         files,
         status: 'running'
       };
-      console.log('DEBUG: saving data.json for', idt);
       await saveData(data);
+      si.delete(idt); //installed
     } catch (err) {
-      console.error('Container creation failed:', err);
-
       if (fs.existsSync(volumePath)) {
         fs.rmSync(volumePath, { recursive: true, force: true });
       }
@@ -165,11 +164,36 @@ router.post('/create', async (req, res) => {
         status: 'failed',
         error: err.message
       };
+      console.log('DEBUG: Saving error state for', idt);
       await saveData(data);
+      console.log('DEBUG: Error state saved for', idt);
+      si.delete(idt);
     }
   })();
 });
 
+router.get('/:idt/state', (req, res) => {
+  const { idt } = req.params;
+  if (si.has(idt)) {
+    return res.json({
+      idt,
+      state: 'installing'
+    });
+  }
+  const data = loadData();
+  const container = data[idt];
+
+  if (!container) {
+    return res.status(404).json({
+      idt,
+      state: 'not_found'
+    });
+  }
+  res.json({
+    idt,
+    state: container.status // 'failed,running,installing'
+  });
+});
 
 /**
  * Edit an existing container entry (files, image, env, resources, port, name, etc.)
@@ -258,8 +282,8 @@ router.post('/edit', async (req, res) => {
       try {
         const oldContainer = docker.getContainer(existing.containerId);
         // Stop (ignore errors) then remove
-        await oldContainer.stop().catch(() => {});
-        await oldContainer.remove({ force: true }).catch(() => {});
+        await oldContainer.stop().catch(() => { });
+        await oldContainer.remove({ force: true }).catch(() => { });
       } catch (err) {
         // log and continue; might be already removed
         console.warn(`Failed to stop/remove previous container ${existing.containerId}:`, err.message);
