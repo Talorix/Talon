@@ -29,7 +29,7 @@ function ensureDataFile() {
   return new Promise((resolve, reject) => {
     fs.access(dataPath, (err) => {
       if (err) {
-        fs.writeFile(dataPath, JSON.stringify([], null, 2), "utf8", (err) => {
+        fs.writeFile(dataPath, JSON.stringify({}, null, 2), "utf8", (err) => {
           if (err) return reject(err);
           resolve("File created");
         });
