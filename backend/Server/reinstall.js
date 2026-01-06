@@ -123,13 +123,14 @@ router.post('/reinstall/:idt', async (req, res) => {
         docker.modem.followProgress(stream, (err) => (err ? reject(err) : resolve()));
       });
     });
-
+    const startupCommand = existing.startCmd.replace(/{{(.*?)}}/g, (_, key) => mergedEnv[key] ?? `{{${key}}}`);
     const container = await docker.createContainer({
       Image: existing.dockerimage,
       name: `talorix_${idt}`,
       Env: objectToEnv(mergedEnv),
       HostConfig: hostConfig,
       ExposedPorts: exposedPorts,
+      Cmd: ['sh', '-c', startupCommand],
       Tty: true,
       OpenStdin: true,
     });

@@ -83,6 +83,25 @@ function ansi(tag, color, message) {
   return `${ANSI[color] || ""}[${tag}]${ANSI.reset} ${message}`;
 }
 
+// Decode caret-style control sequences (e.g. '^C') into actual control characters.
+// '^X' -> single control character (charCode & 0x1F). Leaves other text intact.
+function decodeControlSequences(s) {
+  if (typeof s !== 'string' || s.length === 0) return s;
+  let out = '';
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    if (ch === '^' && i + 1 < s.length) {
+      const next = s[i + 1];
+      const code = next.charCodeAt(0);
+      out += String.fromCharCode(code & 0x1F);
+      i++; // skip next char
+    } else {
+      out += ch;
+    }
+  }
+  return out;
+}
+
 /* Check if Docker daemon is available. */
 async function isDockerRunning() {
   try {
@@ -525,8 +544,22 @@ async function performPower(ws, container, action, requestedContainerId) {
       if (!info?.State?.Running) {
         return sendEvent(ws, "power", ansi("Node", "red", "Container already stopped."));
       }
-      await container.kill();
-      broadcastToContainer(idt, "power", ansi("Node", "red", "Container stopped."));
+      const stopCommand = entry.stopCmd.replace(/{{(.*?)}}/g, (_, key) => entry.env[key] ?? `{{${key}}}`);
+      await container.attach({ stream: true, stdin: true, stdout: true, stderr: true, hijack: true }, (err, stream) => {
+        if (err) return sendEvent(ws, "error", `Failed to attach for stop: ${err.message}`);
+        try {
+          const decoded = decodeControlSequences(stopCommand);
+          if (decoded.length === 1 && decoded.charCodeAt(0) < 0x20) {
+            stream.write(decoded);
+          } else {
+            stream.write(decoded + "\n");
+          }
+        } catch (e) {
+          // Fallback to original behaviour on any failure
+          stream.write(entry.stopCmd + "\n");
+        }
+      });
+      broadcastToContainer(idt, "power", ansi("Node", "red", "Container Stopping."));
     }
   } catch (err) {
     sendEvent(ws, "error", `Power action failed: ${err.message}`);
@@ -568,7 +601,10 @@ async function waitForRunning(container, ws) {
     console.error("waitForRunning fatal error:", err);
   }
 }
-
+async function StartContainer(containerIdOridt) {
+  const resolved = findDataEntryByContainerOridt(containerIdOridt);
+  if (!resolved) throw new Error("Data entry not found");
+}
 /* WebSocket authentication timeout and connection handling. */
 const AUTH_TIMEOUT = 5000;
 wss.on("connection", (ws) => {

@@ -101,7 +101,7 @@ async function recreateContainer(idt) {
   if (ports.length) {
     hostConfig.PortBindings = portBindings;
   }
-
+  const startupCommand = entry.startCmd.replace(/{{(.*?)}}/g, (_, key) => entry.env[key] ?? `{{${key}}}`);
   const container = await docker.createContainer({
     Image: entry.dockerimage,
     name: `talorix_${idt}`,
@@ -109,6 +109,7 @@ async function recreateContainer(idt) {
     HostConfig: hostConfig,
     ExposedPorts: exposedPorts,
     Tty: true,
+    Cmd: ['sh', '-c', startupCommand],
     OpenStdin: true,
   });
 
