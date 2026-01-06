@@ -601,10 +601,7 @@ async function waitForRunning(container, ws) {
     console.error("waitForRunning fatal error:", err);
   }
 }
-async function StartContainer(containerIdOridt) {
-  const resolved = findDataEntryByContainerOridt(containerIdOridt);
-  if (!resolved) throw new Error("Data entry not found");
-}
+
 /* WebSocket authentication timeout and connection handling. */
 const AUTH_TIMEOUT = 5000;
 wss.on("connection", (ws) => {
