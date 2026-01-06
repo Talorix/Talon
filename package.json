@@ -10,7 +10,7 @@
   "type": "commonjs",
   "main": "index.js",
   "scripts": {
-    "configure": "node e/c.js"
+    "configure": "node cli/configure.js"
   },
   "bin": {
     "talon": "./index.js"

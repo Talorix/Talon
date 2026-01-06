@@ -86,7 +86,7 @@ async function recreateContainerWithPorts(idt, ports) {
  * ADD PORT
  * POST /network/:idt/add/:port
  */
-router.post('/:idt/add/:port', async (req, res) => {
+router.post('/network/:idt/add/:port', async (req, res) => {
   try {
     const { idt, port } = req.params;
     const p = Number(port);
@@ -112,7 +112,7 @@ router.post('/:idt/add/:port', async (req, res) => {
  * SET PRIMARY PORT
  * POST /network/:idt/setprimary/:port
  */
-router.post('/:idt/setprimary/:port', async (req, res) => {
+router.post('/network/:idt/setprimary/:port', async (req, res) => {
   try {
     const { idt, port } = req.params;
     const p = Number(port);
@@ -142,7 +142,7 @@ router.post('/:idt/setprimary/:port', async (req, res) => {
  * REMOVE PORT
  * POST /network/:idt/remove/:port
  */
-router.post('/:idt/remove/:port', async (req, res) => {
+router.post('/network/:idt/remove/:port', async (req, res) => {
   try {
     const { idt, port } = req.params;
     const p = Number(port);

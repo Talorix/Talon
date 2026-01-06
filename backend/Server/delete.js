@@ -6,7 +6,6 @@ const router = require('express').Router();
 const docker = new Docker();
 const DATA_FILE = path.join(__dirname, '../../data.json');
 
-// Ensure data file exists
 async function ensureDataFile() {
   try {
     await fs.access(DATA_FILE);
@@ -34,7 +33,6 @@ async function deletesrvdata(idt) {
   }
 }
 
-// delete /server/delete/:idt
 router.delete('/delete/:idt', async (req, res) => {
   try {
     const { idt } = req.params;

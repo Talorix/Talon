@@ -33,7 +33,7 @@ async function getFolderSize(folderPath) {
   return total;
 }
 
-router.get('/:idt/files', async (req, res) => {
+router.get('/fs/:idt/files', async (req, res) => {
   const { idt } = req.params;
   const relPath = req.query.path || '/';
   try {
@@ -66,7 +66,7 @@ router.get('/:idt/files', async (req, res) => {
   }
 });
 
-router.get('/:idt/size', async (req, res) => {
+router.get('/fs/:idt/size', async (req, res) => {
   const { idt } = req.params;
   try {
     const totalSize = await getFolderSize(resolvePath(idt, '/')) || 0;
@@ -78,7 +78,7 @@ router.get('/:idt/size', async (req, res) => {
 });
 
 // Create new file
-router.post('/:idt/file/new', async (req, res) => {
+router.post('/fs/:idt/file/new', async (req, res) => {
   const { idt } = req.params;
   const relPath = req.query.path || '/';
   const { content = '', filename } = req.body;
@@ -94,7 +94,7 @@ router.post('/:idt/file/new', async (req, res) => {
 });
 
 // Create new folder
-router.post('/:idt/folder/new', async (req, res) => {
+router.post('/fs/:idt/folder/new', async (req, res) => {
   const { idt } = req.params;
   const relPath = req.query.path || '/';
   const { filename } = req.body;
@@ -110,7 +110,7 @@ router.post('/:idt/folder/new', async (req, res) => {
 });
 
 // Get file content
-router.get('/:idt/file/content', async (req, res) => {
+router.get('/fs/:idt/file/content', async (req, res) => {
   const { idt } = req.params;
   const relPath = req.query.location;
 
@@ -140,7 +140,7 @@ router.get('/:idt/file/content', async (req, res) => {
 
 
 // Delete file
-router.delete('/:idt/file/delete', async (req, res) => {
+router.delete('/fs/:idt/file/delete', async (req, res) => {
   const { idt } = req.params;
   const relPath = req.query.location;
   if (!relPath) return res.status(400).json({ error: 'location query param is required' });
@@ -155,7 +155,7 @@ router.delete('/:idt/file/delete', async (req, res) => {
 });
 
 // Delete folder
-router.delete('/:idt/folder/delete', async (req, res) => {
+router.delete('/fs/:idt/folder/delete', async (req, res) => {
   const { idt } = req.params;
   const relPath = req.query.location;
   if (!relPath) return res.status(400).json({ error: 'location query param is required' });
@@ -169,7 +169,7 @@ router.delete('/:idt/folder/delete', async (req, res) => {
   }
 });
 // Rename file
-router.post('/:idt/file/rename', async (req, res) => {
+router.post('/fs/:idt/file/rename', async (req, res) => {
   const { idt } = req.params;
   const { location, newName } = req.body;
   if (!location) return res.status(400).json({ error: 'location is required' });
@@ -189,7 +189,7 @@ router.post('/:idt/file/rename', async (req, res) => {
 });
 
 // Rename folder
-router.post('/:idt/folder/rename', async (req, res) => {
+router.post('/fs/:idt/folder/rename', async (req, res) => {
   const { idt } = req.params;
   const { location, newName } = req.body;
   if (!location) return res.status(400).json({ error: 'location is required' });
@@ -208,7 +208,7 @@ router.post('/:idt/folder/rename', async (req, res) => {
   }
 });
 
-router.post('/:idt/file/upload', upload.single('file'), async (req, res) => {
+router.post('/fs/:idt/file/upload', upload.single('file'), async (req, res) => {
   const { idt } = req.params;
   const relPath = req.query.path || '/'; 
 
