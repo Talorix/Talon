@@ -2,7 +2,6 @@ const path = require("path");
 const fsPromises = require("fs").promises;
 const Docker = require("dockerode");
 const docker = new Docker();
-const { broadcastToContainer } = require("../index");
 const DATA_PATH = path.join(__dirname, "../data.json");
 
 let data = null;
