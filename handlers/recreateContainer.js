@@ -2,7 +2,7 @@ const path = require("path");
 const fsPromises = require("fs").promises;
 const Docker = require("dockerode");
 const docker = new Docker();
-
+const { broadcastToContainer } = require("../index");
 const DATA_PATH = path.join(__dirname, "../data.json");
 
 let data = null;
@@ -47,7 +47,7 @@ async function readData() {
  * IMPORTANT: callers should cleanup log/stat streams for previous containerId
  * BEFORE calling this function to avoid races.
  */
-async function recreateContainer(idt) {
+async function recreateContainer(idt, logFn = () => { }) {
   const current = await readData();
   const entry = current[idt];
   if (!entry) throw new Error("Data entry not found");
@@ -58,13 +58,22 @@ async function recreateContainer(idt) {
   await new Promise((resolve, reject) => {
     docker.pull(entry.dockerimage, (err, stream) => {
       if (err) return reject(err);
-      docker.modem.followProgress(stream, (err) =>
-        err ? reject(err) : resolve()
+      docker.modem.followProgress(
+        stream,
+        (err) => err ? reject(err) : resolve(),
+        (event) => {
+          if (event.status) {
+            const idText = event.id ? ` ${event.id}` : '';
+            const progressText = event.progress ? ` ${event.progress}` : '';
+            const message = `[Pulling] ${event.status}${idText}${progressText}\r\n`;
+            logFn(message);
+          }
+        }
       );
+
     });
   });
 
-  // remove old container if exists (recreate caller should have cleaned streams)
   if (entry.containerId) {
     try {
       const old = docker.getContainer(entry.containerId);

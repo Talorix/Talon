@@ -485,7 +485,7 @@ async function executeCommand(ws, container, command, requestedContainerId) {
     stream.on("error", (err) => sendEvent(ws, "error", `Exec stream error: ${err.message}`));
 
     if (command === '^C') {
-      stream.write('');
+      await container.kill();
       stream.end();
     } else {
       stream.write(command + "\n");
@@ -529,7 +529,9 @@ async function performPower(ws, container, action, requestedContainerId) {
         cleanupStatsByContainerId(currentContainerId);
       }
 
-      const newContainer = await recreateContainer(idt);
+      const newContainer = await recreateContainer(idt, (logMessage) => {
+         broadcastToContainer(idt, 'docker-log', logMessage);
+      });
 
       for (const c of clients.get(idt) || []) {
         streamLogs(c, newContainer, newContainer.id);
@@ -562,6 +564,7 @@ async function performPower(ws, container, action, requestedContainerId) {
       broadcastToContainer(idt, "power", ansi("Node", "red", "Container Stopping."));
     }
   } catch (err) {
+    console.log(err)
     sendEvent(ws, "error", `Power action failed: ${err.message}`);
   }
 }
