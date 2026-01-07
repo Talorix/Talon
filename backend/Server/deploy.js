@@ -94,7 +94,7 @@ router.post('/create', async (req, res) => {
     try {
       await fsPromises.mkdir(volumePath, { recursive: true });
 
-      const { dockerimage, env = {}, name, ram, core, disk, port, files = [] } = req.body;
+      const { dockerimage, env = {}, name, ram, core, disk, port, files = [], startCmd, stopCmd } = req.body;
       const containerEnv = { ...env, MEMORY: `${ram}M`, TID: idt, PORT: port };
       for (const file of files) {
         const resolvedUrl = file.url.replace(/{{(.*?)}}/g, (_, key) =>
@@ -128,6 +128,7 @@ router.post('/create', async (req, res) => {
       });
 
       // Create container
+      const startupCommand = startCmd.replace(/{{(.*?)}}/g, (_, key) => containerEnv[key] ?? `{{${key}}}`);
       const container = await docker.createContainer({
         Image: dockerimage,
         name: `talorix_${idt}`,
@@ -296,14 +297,14 @@ router.post('/edit', async (req, res) => {
       }
     }
 
-    // Create new container with same name
+    const startupCommand = existing.startCmd.replace(/{{(.*?)}}/g, (_, key) => mergedEnv[key] ?? `{{${key}}}`);
     const container = await docker.createContainer({
       Image: finalDockerImage,
       name: `talorix_${idt}`,
       Env: objectToEnv(mergedEnv),
       HostConfig: hostConfig,
       ExposedPorts: exposedPorts,
-      Cmd: ['sh', '-c', startCmd],
+      Cmd: ['sh', '-c', startupCommand],
       Tty: true,
       OpenStdin: true,
     });
