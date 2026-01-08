@@ -145,4 +145,5 @@ setInterval(async () => {
 module.exports = {
   readData,
   recreateContainer,
+  writeData,
 };

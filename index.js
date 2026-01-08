@@ -8,7 +8,7 @@ const os = require("os");
 const path = require("path");
 const fsPromises = require("fs").promises;
 const fs = require('fs');
-const { readData, recreateContainer } = require("./handlers/recreateContainer.js");
+const { readData, recreateContainer, writeData } = require("./handlers/recreateContainer.js");
 
 /* Start FTP server shortly after startup to allow other initialization to complete. */
 setTimeout(() => {
@@ -27,12 +27,9 @@ if (os.platform() === 'win32') {
 /* Ensure the data.json file exists; create an empty object file if missing. */
 function ensureDataFile() {
   return new Promise((resolve, reject) => {
-    fs.access(dataPath, (err) => {
+    fs.access(dataPath, async (err) => {
       if (err) {
-        fs.writeFile(dataPath, JSON.stringify({}, null, 2), "utf8", (err) => {
-          if (err) return reject(err);
-          resolve("File created");
-        });
+        await writeData('{}');
       } else {
         resolve("File exists");
       }
@@ -62,8 +59,8 @@ setInterval(async () => {
   } catch (err) {
     console.error("reloadData error:", err);
   }
-}, 5000);
-
+}, 1000);
+// use smth else except json? shut your goofy ass banana up
 const app = express();
 app.use(express.json());
 
@@ -137,10 +134,9 @@ function loadRoutes(dirPath, routePrefix = '/server') {
   files.forEach((file) => {
     const fullPath = path.join(dirPath, file);
     const stat = fs.statSync(fullPath);
-    if (file === "ftp.js") return; // skip FTP module
     if (stat.isDirectory()) {
       loadRoutes(fullPath, routePrefix);
-    } else if (file.endsWith('.js')) {
+    } else if (file.endsWith('.js') && file !== "ftp.js") {
       import(fullPath).then((module) => {
         if (module.default) {
           app.use(routePrefix, module.default);
@@ -335,7 +331,7 @@ async function streamLogs(ws, container, requestedContainerId) {
     const info = await container.inspect().catch(() => null);
     if (info && info.State && info.State.Running) {
       try { await container.kill(); } catch (e) { /* ignore */ }
-      broadcastToContainer(idt, "power", ansi("Node", "red", "Server disk exceed — container stopped."));
+      broadcastToContainer(idt, "power", ansi("Node", "red", "Server disk exceed — Stopping the container."));
     } else {
       broadcastToContainer(idt, "power", ansi("Node", "red", "Server disk exceed — container blocked."));
     }
@@ -521,6 +517,14 @@ async function performPower(ws, container, action, requestedContainerId) {
       return;
     }
 
+    if (action === "kill") {
+      if (!info?.State?.Running) {
+        return sendEvent(ws, "power", ansi("Node", "red", "Container already stopped."));
+      }
+      await container.kill();
+      broadcastToContainer(idt, "power", ansi("Node", "red", "Container killed."));
+      return;
+    }
     if (action === "start" || action === "restart") {
       broadcastToContainer(idt, "power", ansi("Node", "yellow", "Pulling the latest docker image..."));
 
@@ -547,6 +551,9 @@ async function performPower(ws, container, action, requestedContainerId) {
         return sendEvent(ws, "power", ansi("Node", "red", "Container already stopped."));
       }
       const stopCommand = entry.stopCmd.replace(/{{(.*?)}}/g, (_, key) => entry.env[key] ?? `{{${key}}}`);
+      if (stopCommand === "^C") {
+        return await container.kill();
+      }
       await container.attach({ stream: true, stdin: true, stdout: true, stderr: true, hijack: true }, (err, stream) => {
         if (err) return sendEvent(ws, "error", `Failed to attach for stop: ${err.message}`);
         try {
@@ -557,7 +564,6 @@ async function performPower(ws, container, action, requestedContainerId) {
             stream.write(decoded + "\n");
           }
         } catch (e) {
-          // Fallback to original behaviour on any failure
           stream.write(entry.stopCmd + "\n");
         }
       });
@@ -568,43 +574,6 @@ async function performPower(ws, container, action, requestedContainerId) {
     sendEvent(ws, "error", `Power action failed: ${err.message}`);
   }
 }
-
-/*
- * Wait for a container to reach the running state (polling). Once running, attach logs for connected clients.
- */
-async function waitForRunning(container, ws) {
-  const resolved = findDataEntryByContainerOridt(container.id);
-  const idt = resolved ? resolved.idt : container.id;
-
-  let info;
-  try {
-    for (let attempts = 0; attempts < 20; attempts++) {
-      try {
-        info = await container.inspect();
-        if (info.State && info.State.Running) break;
-      } catch (err) {
-        console.error("waitForRunning inspect failed:", err.message);
-      }
-      await new Promise((r) => setTimeout(r, 500));
-    }
-
-    if (!info || !info.State.Running) {
-      broadcastToContainer(idt, "error", "Container failed to reach running state.");
-      return;
-    }
-
-    for (const c of clients.get(idt) || []) {
-      try {
-        streamLogs(c, container, container.id);
-      } catch (err) {
-        console.error("Failed to stream logs:", err);
-      }
-    }
-  } catch (err) {
-    console.error("waitForRunning fatal error:", err);
-  }
-}
-
 /* WebSocket authentication timeout and connection handling. */
 const AUTH_TIMEOUT = 5000;
 wss.on("connection", (ws) => {
@@ -660,7 +629,9 @@ wss.on("connection", (ws) => {
         case "power:start":
         case "power:stop":
         case "power:restart":
-          await performPower(ws, container, event.split(":")[1], providedContainerId);
+        case "power:kill":
+          const action = event.split(":")[1];
+          await performPower(ws, container, action, providedContainerId);
           break;
         default:
           sendEvent(ws, "error", "Unknown event");
@@ -710,12 +681,16 @@ app.get("/stats", (req, res) => {
     const cpus = os.cpus();
     const load = os.loadavg();
     const uptime = os.uptime();
-
+    const usageCpu = cpus.reduce((acc, cpu) => {
+      const total = Object.values(cpu.times).reduce((t, n) => t + n, 0);
+      return acc + ((total - cpu.times.idle) / total) * 100;
+    }, 0) / cpus.length;
     res.json({
       stats: {
         totalRamGB: (totalRam / 1e9).toFixed(2),
         usedRamGB: ((totalRam - freeRam) / 1e9).toFixed(2),
         totalCpuCores: cpus.length,
+        cpuUsagePercent: parseFloat(usageCpu),
         cpuModel: cpus[0]?.model || "unknown",
         cpuSpeed: cpus[0]?.speed || "unknown",
         osType: os.type(),
@@ -723,6 +698,7 @@ app.get("/stats", (req, res) => {
         osArch: os.arch(),
         osRelease: os.release(),
         uptime: `${Math.floor(uptime / 3600)}h ${Math.floor((uptime % 3600) / 60)}m`,
+        processUptimeSeconds: process.uptime(),
         load1: load[0].toFixed(2),
         load5: load[1].toFixed(2),
         load15: load[2].toFixed(2),
@@ -743,7 +719,7 @@ async function getVersion() {
  _____     _             
 |_   _|_ _| | ___  _ __  
   | |/ _\` | |/ _ \| '_ \ 
-  | | (_| | | (_) | | | |   ${version}
+  | | (_| | | (_) | | | |   %s
   |_|\__,_|_|\___/|_| |_|
 
 Copyright © %s Talon Project
@@ -754,7 +730,7 @@ Source:   https://github.com/talorix/talon
     const gray = '\x1b[90m';
     const reset = '\x1b[0m';
     const asciiWithColor = ascii.replace(version, reset + version + gray);
-    console.log(gray + asciiWithColor + reset, new Date().getFullYear());
+    console.log(gray + asciiWithColor + reset, version, new Date().getFullYear());
   } catch (err) {
     console.error('Failed to fetch version:', err);
   }
